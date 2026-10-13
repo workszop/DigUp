@@ -1,18 +1,21 @@
 // The search panel's DOM contract, checked headless: shell/ui/index.html with a stand-in for Tauri, fixed results,
-// the keys a person presses. Breaking the contract fails this even when the panel still looks right.
-//   node shell/ui/tests/panel-contract.mjs      (PLAYWRIGHT_PATH: Playwright's index.mjs; CHROME: the browser)
-import { pathToFileURL } from "node:url";
+// the keys a person presses. Breaking the contract fails this even when the panel still looks right. It lives outside
+// shell/ui, so it isn't built into the app.
+//   node shell/tests/panel-contract.mjs
+// Playwright comes from node's own resolution unless PLAYWRIGHT_PATH names its index.mjs; the browser is Playwright's
+// own unless CHROME names one.
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
 
-const { chromium } = await import(process.env.PLAYWRIGHT_PATH ?? "/home/andrzey/.hermes/hermes-agent/node_modules/playwright/index.mjs");
-const page_ = pathToFileURL(resolve(dirname(new URL(import.meta.url).pathname), "../index.html")).href;
+const { chromium } = await import(process.env.PLAYWRIGHT_PATH ?? "playwright");
+const page_ = pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), "../ui/index.html")).href;
 const HITS = [
   { path: "/t/video/lecture.mp4", kind: "video", segment: "audio", segment_id: 1, score: 0.9, modified: 1760000000, size: 1000, info: {}, loc: 6.0 },
   { path: "/t/docs/lease agreement.pdf", kind: "pdf", segment: "page", segment_id: 2, score: 0.8, modified: 1760000000, size: 2000, info: { pages: 4 }, loc: 3 },
   { path: "/t/code/src/main.rs", kind: "code", segment: "lines", segment_id: 3, score: 0.4, modified: 1760000000, size: 300, info: { lines: 40 }, loc: 10, loc_end: 20, focus: 12 },
 ];
 
-const browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome" });
+const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : {});
 const page = await browser.newPage();
 await page.addInitScript((hits) => {
   const listeners = {};

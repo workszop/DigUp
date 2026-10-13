@@ -162,7 +162,7 @@ function revealSelected() {
 // MARK: Drawing
 
 /// The panel's state on the page itself (data-* on <body> and the rows), so a probe reads it instead of the pixels
-/// (shell/ui/tests/panel-contract.mjs).
+/// (shell/tests/panel-contract.mjs).
 function publish() {
   const data = document.body.dataset;
   data.phase = state.phase;

@@ -27,14 +27,27 @@ shortcut() {   # add | remove
   python3 -I - "$1" "$SHORTCUTS" "$BIN/digup-shell --toggle" <<'PY'
 import os, re, sys
 action, path, command = sys.argv[1:]
-text = open(path).read() if os.path.exists(path) else "{\n}\n"
+text = open(path).read() if os.path.exists(path) else ""
+# An empty file (or one of blank lines) is an empty map.
+if "{" not in text:
+    text = "{\n}\n"
+# A file that doesn't end its map where expected isn't one this can edit safely, so it is left as it is (and the
+# install goes on: a shortcut is no reason to leave DigUp stopped).
+if not text.rstrip().endswith("}"):
+    print("DigUp left %s alone: it doesn't end with the } of a map, so add the shortcut in COSMIC's settings" % path,
+          file=sys.stderr)
+    sys.exit(0)
 entry = re.compile(r'\n?[ \t]*\(\s*modifiers:[^)]*\],\s*key:[^)]*?description: Some\("digup"\),\s*\): Spawn\("[^"]*"\),')
 text = entry.sub("", text)
 if action == "add":
     block = ('\n    (\n        modifiers: [\n            Ctrl,\n            Shift,\n        ],\n        key: "space",\n'
              '        description: Some("digup"),\n    ): Spawn("%s"),' % command)
     end = text.rstrip().rfind("}")
-    text = text[:end].rstrip() + block + "\n}\n"
+    head = text[:end].rstrip()
+    # RON lets the last entry go without its comma; DigUp's comes after it, so it needs one.
+    if not head.endswith(("{", ",")):
+        head += ","
+    text = head + block + "\n}\n"
 tmp = path + ".digup-new"
 open(tmp, "w").write(text)
 os.replace(tmp, path)

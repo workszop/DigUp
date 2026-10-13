@@ -75,6 +75,39 @@ install_digup
 valid_shortcuts "two installs" 1
 grep -q 'clippy.sh pick' "$SHORTCUTS" || fail "user's shortcut lost"
 
+# A last entry written without its trailing comma (RON allows that) gets one before DigUp's.
+cat > "$SHORTCUTS" <<'RON'
+{
+    (
+        modifiers: [
+            Super,
+        ],
+        key: "z",
+        description: Some("zoom"),
+    ): Spawn("/home/x/bin/zoom.sh")
+}
+RON
+install_digup
+valid_shortcuts "no trailing comma" 1
+grep -q 'zoom.sh' "$SHORTCUTS" || fail "user's shortcut lost (no trailing comma)"
+install_digup --uninstall
+valid_shortcuts "uninstall after no trailing comma" 0
+grep -q 'zoom.sh' "$SHORTCUTS" || fail "uninstall removed the user's shortcut (no trailing comma)"
+
+# An empty shortcuts file (or one of only blank lines) becomes a map with DigUp's entry in it.
+printf '  \n\n' > "$SHORTCUTS"
+install_digup
+valid_shortcuts "empty file" 1
+install_digup --uninstall
+valid_shortcuts "uninstall after empty file" 0
+
+# A file that doesn't end with the map's } is one the installer can't edit safely: it stays as it was, and the
+# install still finishes.
+printf '{\n    (\n' > "$SHORTCUTS"; cp "$SHORTCUTS" "$ROOT/unreadable"
+"$REPO/scripts/install-linux.sh" > /dev/null 2>&1 || fail "an unreadable shortcuts file stopped the install"
+cmp -s "$SHORTCUTS" "$ROOT/unreadable" || fail "an unreadable shortcuts file was changed"
+rm "$SHORTCUTS"
+
 # MARK: Uninstall
 
 install_digup

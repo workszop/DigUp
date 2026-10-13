@@ -42,9 +42,10 @@ const state = {
   generation: 0,
   finalGeneration: -1,   // the generation whose meaning results are showing: late keyword results don't replace them
   timer: null,
-  phase: "empty",        // empty | words | meaning | wordsOnly | codeHint
+  phase: "empty",        // empty | words | meaning | wordsOnly | codeHint | codeOff
   text: "",              // what was searched (without "code:")
   isCode: false,
+  codeOn: false,         // there are code folders (main.rs `code_search_on`, then the "code-search" event)
   strong: [],
   weaker: [],
   groups: [],
@@ -71,8 +72,10 @@ function queryChanged() {
   const code = /^code:/i.test(typed);
   const text = code ? typed.slice(5).trim() : typed;
   state.isCode = code;
-  if (!typed || (code && !text)) {
-    show({ hits: [], strong: 0 }, text, typed ? "codeHint" : "empty");
+  // "code:" alone, or without code folders: what to do instead of results (the Mac panel's codeHint and codeOff).
+  if (!typed || (code && (!text || !state.codeOn))) {
+    show({ hits: [], strong: 0 }, text, !typed ? "empty" : state.codeOn ? "codeHint" : "codeOff");
+    if (debugPending && typed) report();
     return;
   }
   // Words now. The last word is probably half-typed, so it matches as a prefix.
@@ -168,6 +171,14 @@ function chooseFolders() {
   invoke("choose_folders").catch(failed);
 }
 
+/// Code search turned on or off (code folders chosen or taken out): a "code:" query showing is asked again.
+function codeSearchChanged(on) {
+  if (state.codeOn === on) return;
+  state.codeOn = on;
+  publish();
+  if (state.isCode) queryChanged();
+}
+
 // MARK: Drawing
 
 /// The panel's state on the page itself (data-* on <body> and the rows), so a probe reads it instead of the pixels
@@ -178,6 +189,7 @@ function publish() {
   data.count = String(state.strong.length + state.weaker.length);
   data.selected = state.selection ?? "";
   data.error = state.error ?? "";
+  data.code = state.codeOn ? "on" : "off";
 }
 
 function render() {
@@ -267,6 +279,9 @@ function renderPreview() {
   if (!state.strong.length && !state.weaker.length) {
     if (state.phase === "codeHint") {
       $preview.append(message("Search your code", "Say what the code does, or type a name that's in it."));
+    } else if (state.phase === "codeOff") {
+      $preview.append(message("Code search is off", "DigUp can find code by what it does, in the folders you pick. "
+        + `Add code folders with the gear (${MOD},).`));
     } else if (state.indexing) {
       const { done, total } = state.indexing;
       $preview.append(message("Nothing yet", `Still indexing (${done} of ${total} files). Until a file is read, `
@@ -376,6 +391,7 @@ function renderFooter() {
     summary = state.encoder === "starting" ? "Matching words; meaning search is warming up…" : "Matching words…";
   } else if (state.phase === "wordsOnly") summary = "Words only: meaning search isn't available";
   else if (state.phase === "codeHint") summary = "Searching your code";
+  else if (state.phase === "codeOff") summary = "Code search is off";
   else summary = `${strong} ${strong === 1 ? "result" : "results"}` + (weaker ? ` · ${weaker} weaker` : "");
   // Results while indexing are partial: say so where they're counted.
   if (state.indexing && !state.error) summary += ` · still indexing (${state.indexing.done} of ${state.indexing.total})`;
@@ -587,7 +603,10 @@ tauri.event.listen("panel-shown", () => {
   $query.focus();
   $query.select();
   ask({ op: "prewarm" }).catch(() => {});
+  invoke("code_search_on").then((on) => codeSearchChanged(on === true)).catch(() => {});
 });
+
+tauri.event.listen("code-search", ({ payload }) => codeSearchChanged(payload === true));
 
 tauri.event.listen("helper", ({ payload }) => {
   const { from, event } = payload;
@@ -609,6 +628,8 @@ tauri.event.listen("helper", ({ payload }) => {
 });
 
 publish();   // data-phase="empty" is there before anything is typed
+// Whether code search is on, asked as the page loads (and again whenever the panel shows).
+const codeSearchKnown = invoke("code_search_on").then((on) => codeSearchChanged(on === true)).catch(() => {});
 
 tauri.path.homeDir().then((home) => { state.home = home.replace(/[\\/]$/, ""); }).catch(() => {});
 
@@ -616,9 +637,12 @@ tauri.path.homeDir().then((home) => { state.home = home.replace(/[\\/]$/, ""); }
 // what the panel shows.
 function debugSearch(query) {
   if (!query) return;
-  debugPending = true;
-  $query.value = query;
-  queryChanged();
+  // A "code:" query needs to know whether code search is on first.
+  codeSearchKnown.then(() => {
+    debugPending = true;
+    $query.value = query;
+    queryChanged();
+  });
 }
 invoke("debug_query").then(debugSearch);
 tauri.event.listen("debug-query", ({ payload }) => debugSearch(payload));   // after setup's first index

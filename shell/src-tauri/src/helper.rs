@@ -2,11 +2,12 @@
 //! in, the reply on a line out with the request's id; lines without an id are events), and `digup index-service` keeps
 //! the index current (commands in, events out) and exits when it's done. Sources/digup has both protocols.
 
+use crate::settings::Settings;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,6 +64,42 @@ impl Launch {
     }
 }
 
+// MARK: Arguments
+
+/// What `index-service` is told: the index, what's skipped, code search's folders (each with `--code-root`; none and
+/// there's no code index to keep), then the folders. Only code folders is fine: it keeps the code index alone.
+pub fn index_service_args(index: Option<&Path>, folders: &[String], settings: &Settings) -> Vec<String> {
+    let mut args = vec!["index-service".to_string(), "--backfill".to_string()];
+    args.extend(chosen_args(index, folders, settings));
+    args
+}
+
+/// What `search-service` is told: the same folders, so that it shows what indexing keeps, and nothing from a folder
+/// taken out. Without code folders it finds no code.
+pub fn search_service_args(index: Option<&Path>, folders: &[String], settings: &Settings) -> Vec<String> {
+    let mut args = vec!["search-service".to_string()];
+    args.extend(chosen_args(index, folders, settings));
+    args
+}
+
+fn chosen_args(index: Option<&Path>, folders: &[String], settings: &Settings) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut add = |flag: &str, values: &[String]| {
+        for value in values {
+            args.extend([flag.to_string(), value.clone()]);
+        }
+    };
+    if let Some(index) = index {
+        add("--index", &[index.display().to_string()]);
+    }
+    add("--exclude", &settings.skipped);
+    add("--exclude-ext", &settings.skip_types);
+    add("--code-root", &settings.code_roots);
+    add("--code-exclude", &settings.code_skipped);
+    args.extend(folders.iter().cloned());
+    args
+}
+
 /// Asks the process to stop (`farewell` on stdin, then stdin closed), and ends it if it hasn't within two seconds.
 fn stop(mut child: Child, mut stdin: ChildStdin, farewell: &str) {
     let _ = writeln!(stdin, "{farewell}").and_then(|_| stdin.flush());
@@ -79,7 +116,8 @@ fn stop(mut child: Child, mut stdin: ChildStdin, farewell: &str) {
 
 /// `digup search-service`: started on the first request, and again after it died.
 pub struct SearchService {
-    launch: Launch,
+    /// How the next one starts: `relaunch` keeps it to the folders chosen since.
+    launch: Mutex<Launch>,
     running: Mutex<Option<Searching>>,
     next_id: AtomicU64,
     on_event: EventSink,
@@ -94,7 +132,13 @@ struct Searching {
 
 impl SearchService {
     pub fn new(launch: Launch, on_event: impl Fn(Value) + Send + Sync + 'static) -> SearchService {
-        SearchService { launch, running: Mutex::new(None), next_id: AtomicU64::new(1), on_event: Arc::new(on_event) }
+        SearchService { launch: Mutex::new(launch), running: Mutex::new(None), next_id: AtomicU64::new(1),
+                        on_event: Arc::new(on_event) }
+    }
+
+    /// The arguments the next start gets (the running one is told about a change of folders by a request).
+    pub fn relaunch(&self, args: Vec<String>) {
+        self.launch.lock().unwrap().args = args;
     }
 
     /// Sends a request and waits for its reply.
@@ -131,7 +175,7 @@ impl SearchService {
     }
 
     fn start(&self) -> Result<Searching, String> {
-        let (child, stdin, stdout) = self.launch.spawn()?;
+        let (child, stdin, stdout) = self.launch.lock().unwrap().spawn()?;
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> = Arc::default();
         let (replies, on_event) = (pending.clone(), self.on_event.clone());
         std::thread::spawn(move || {
@@ -162,7 +206,8 @@ impl SearchService {
 }
 
 /// `digup index-service`: syncs the index with the folders, indexes what's new, and exits once it's done. `run` starts
-/// it, asks the running one to sync again, or, when the folders changed (another launch), starts it over with them.
+/// it, asks the running one to sync again ("sync" for the folders, "sync code" for the code folders), or, when the
+/// folders changed (another launch), starts it over with them. A new one syncs both by itself.
 pub struct IndexService {
     running: Mutex<Option<(Child, ChildStdin, Vec<String>)>>,
     on_event: EventSink,
@@ -173,12 +218,14 @@ impl IndexService {
         IndexService { running: Mutex::new(None), on_event: Arc::new(on_event) }
     }
 
-    pub fn run(&self, launch: &Launch) -> Result<(), String> {
+    pub fn run(&self, launch: &Launch, syncs: &[&str]) -> Result<(), String> {
         let mut running = self.running.lock().unwrap();
         if let Some((child, stdin, args)) = running.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
                 if *args == launch.args {
-                    return writeln!(stdin, "sync").and_then(|_| stdin.flush()).map_err(|error| error.to_string());
+                    let mut asked = syncs.iter().try_for_each(|sync| writeln!(stdin, "{sync}"));
+                    asked = asked.and_then(|_| stdin.flush());
+                    return asked.map_err(|error| error.to_string());
                 }
                 let (child, stdin, _) = running.take().unwrap();
                 stop(child, stdin, "stop");
@@ -250,5 +297,61 @@ impl ModelDownload {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chosen() -> Settings {
+        Settings {
+            folders: vec!["/home/me/Documents".into()],
+            skipped: vec!["/home/me/Documents/old".into()],
+            skip_types: vec!["heic".into()],
+            code_roots: vec!["/home/me/src".into(), "/home/me/work".into()],
+            code_skipped: vec!["/home/me/src/vendor".into()],
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn index_service_gets_the_code_folders() {
+        let settings = chosen();
+        let args = index_service_args(Some(Path::new("/idx")), &settings.folders, &settings);
+        assert_eq!(args, [
+            "index-service", "--backfill", "--index", "/idx",
+            "--exclude", "/home/me/Documents/old", "--exclude-ext", "heic",
+            "--code-root", "/home/me/src", "--code-root", "/home/me/work", "--code-exclude", "/home/me/src/vendor",
+            "/home/me/Documents",
+        ]);
+    }
+
+    #[test]
+    fn search_service_gets_the_code_folders() {
+        let settings = chosen();
+        let args = search_service_args(None, &settings.folders, &settings);
+        assert_eq!(args, [
+            "search-service",
+            "--exclude", "/home/me/Documents/old", "--exclude-ext", "heic",
+            "--code-root", "/home/me/src", "--code-root", "/home/me/work", "--code-exclude", "/home/me/src/vendor",
+            "/home/me/Documents",
+        ]);
+    }
+
+    #[test]
+    fn code_folders_alone_are_enough() {
+        let settings = Settings { code_roots: vec!["/home/me/src".into()], ..Settings::default() };
+        assert_eq!(index_service_args(None, &[], &settings), ["index-service", "--backfill", "--code-root", "/home/me/src"]);
+        assert_eq!(search_service_args(None, &[], &settings), ["search-service", "--code-root", "/home/me/src"]);
+    }
+
+    #[test]
+    fn without_code_folders_there_is_no_code_flag() {
+        let settings = Settings { folders: vec!["/home/me/Pictures".into()], ..Settings::default() };
+        let args = index_service_args(None, &settings.folders, &settings);
+        assert!(!args.iter().any(|arg| arg.starts_with("--code")), "{args:?}");
+        let args = search_service_args(None, &settings.folders, &settings);
+        assert!(!args.iter().any(|arg| arg.starts_with("--code")), "{args:?}");
     }
 }

@@ -45,6 +45,8 @@ struct Shell {
     /// The model for the setup window and the tray: {"state": "checking|downloading|waiting|ready|failed", …}.
     model_state: Mutex<Value>,
     watcher: Mutex<Option<FolderWatcher>>,
+    /// Code search's folders have their own: their changes are synced a while after they settle.
+    code_watcher: Mutex<Option<FolderWatcher>>,
     /// The tray menu's first line: what's going on.
     status: Mutex<Option<MenuItem<Wry>>>,
     /// When the search service last reloaded the index (while indexing, at most every few seconds).
@@ -61,6 +63,16 @@ impl Shell {
             return self.options.roots.iter().map(|root| root.display().to_string()).collect();
         }
         self.settings.lock().unwrap().folders.clone()
+    }
+
+    /// Code search's folders (none: code search is off).
+    fn code_folders(&self) -> Vec<String> {
+        self.settings.lock().unwrap().code_roots.clone()
+    }
+
+    /// Something to index: folders, code folders, or both.
+    fn has_folders(&self) -> bool {
+        !self.folders().is_empty() || !self.code_folders().is_empty()
     }
 
     fn is_set_up(&self) -> bool {
@@ -83,23 +95,16 @@ impl Shell {
         }
     }
 
-    fn index_arguments(&self) -> Vec<String> {
-        self.options.index.iter().flat_map(|index| ["--index".to_string(), index.display().to_string()]).collect()
-    }
-
-    /// `index-service` for the folders as they are now.
+    /// `index-service` for the folders and code folders as they are now.
     fn index_launch(&self) -> Launch {
         let settings = self.settings.lock().unwrap().clone();
-        let mut args = vec!["index-service".to_string(), "--backfill".to_string()];
-        args.extend(self.index_arguments());
-        for folder in &settings.skipped {
-            args.extend(["--exclude".to_string(), folder.clone()]);
-        }
-        for extension in &settings.skip_types {
-            args.extend(["--exclude-ext".to_string(), extension.clone()]);
-        }
-        args.extend(self.folders());
-        self.launch(args, "index.log")
+        self.launch(helper::index_service_args(self.options.index.as_deref(), &self.folders(), &settings), "index.log")
+    }
+
+    /// `search-service`'s arguments for the folders and code folders as they are now.
+    fn search_arguments(&self) -> Vec<String> {
+        let settings = self.settings.lock().unwrap().clone();
+        helper::search_service_args(self.options.index.as_deref(), &self.folders(), &settings)
     }
 
     fn model_ready(&self) -> bool {
@@ -120,13 +125,17 @@ async fn ask(shell: State<'_, Arc<Shell>>, request: Value) -> Result<Value, Stri
 }
 
 /// What indexing these folders would take, one answer per folder (`digup estimate --json`): files by kind, the first
-/// pass's seconds, the rest of long files, subfolders. For setup.
+/// pass's seconds, the rest of long files, subfolders. With `code`, what code search would read there and about how
+/// much room its index takes (`--code`: "bytes"). For setup.
 #[tauri::command]
-async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>) -> Result<Vec<Value>, String> {
+async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Option<bool>) -> Result<Vec<Value>, String> {
     let helper = shell.options.helper.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut command = std::process::Command::new(&helper);
         command.arg("estimate").args(&folders).arg("--json");
+        if code == Some(true) {
+            command.arg("--code");
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -139,7 +148,8 @@ async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>) -> Result<
     .map_err(|error| error.to_string())?
 }
 
-/// What the setup window starts from: the folders it offers, the hotkey, the model, the folders already chosen.
+/// What the setup window starts from: the folders it offers, the hotkey, the model, the folders and code folders
+/// already chosen.
 #[tauri::command]
 fn setup_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
     let offered: Vec<PathBuf> = match &shell.options.offered {
@@ -157,29 +167,34 @@ fn setup_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
     json!({
         "offered": offered.iter().map(|folder| folder.display().to_string()).collect::<Vec<_>>(),
         "chosen": shell.folders(),
+        "codeChosen": shell.code_folders(),
         "hotkey": shortcut_text(&shell.hotkey()),
         "model": shell.model_state.lock().unwrap().clone(),
         "auto": shell.options.debug_setup,
     })
 }
 
-/// Folders chosen in the system's folder picker (none when it's cancelled).
+/// Folders chosen in the system's folder picker (none when it's cancelled); `code` for code search's.
 #[tauri::command]
-async fn pick_folders(app: AppHandle) -> Vec<String> {
+async fn pick_folders(app: AppHandle, code: Option<bool>) -> Vec<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title("Add Folders").pick_folders(move |folders| {
+    let title = if code == Some(true) { "Add Code Folders" } else { "Add Folders" };
+    app.dialog().file().set_title(title).pick_folders(move |folders| {
         let _ = sender.send(folders);
     });
     let picked = receiver.await.ok().flatten().unwrap_or_default();
     picked.into_iter().filter_map(|folder| folder.into_path().ok()).map(|path| path.display().to_string()).collect()
 }
 
-/// Setup's last step: the folders are saved and indexing starts (once the model is in).
+/// Setup's last step: the folders and code folders are saved and indexing starts (once the model is in). No code
+/// folders turns code search off.
 #[tauri::command]
-fn finish_setup(app: AppHandle, shell: State<'_, Arc<Shell>>, folders: Vec<String>) -> Result<(), String> {
+fn finish_setup(app: AppHandle, shell: State<'_, Arc<Shell>>, folders: Vec<String>, code_folders: Vec<String>)
+    -> Result<(), String> {
     {
         let mut settings = shell.settings.lock().unwrap();
         settings.folders = folders;
+        settings.set_code_folders(code_folders);
         settings.set_up = true;
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
     }
@@ -188,6 +203,13 @@ fn finish_setup(app: AppHandle, shell: State<'_, Arc<Shell>>, folders: Vec<Strin
         let _ = window.close();
     }
     Ok(())
+}
+
+/// Whether code search is on (there are code folders): without, the panel says how to turn it on when "code:" is
+/// typed. A change comes as the "code-search" event.
+#[tauri::command]
+fn code_search_on(shell: State<'_, Arc<Shell>>) -> bool {
+    !shell.code_folders().is_empty()
 }
 
 /// Opens a result in its default app.
@@ -315,8 +337,8 @@ fn main() {
         )
         .setup(move |app| setup(app, options))
         .invoke_handler(tauri::generate_handler![
-            ask, estimate, setup_info, pick_folders, finish_setup, open_path, open_hit, reveal, hide_panel, choose_folders,
-            panel_height,
+            ask, estimate, setup_info, pick_folders, finish_setup, code_search_on, open_path, open_hit, reveal, hide_panel,
+            choose_folders, panel_height,
             debug_query, debug_report
         ])
         .build(tauri::generate_context!())
@@ -346,13 +368,10 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     } else {
         options.roots.iter().map(|root| root.display().to_string()).collect()
     };
-    let mut search_args = vec!["search-service".to_string()];
-    search_args.extend(options.index.iter().flat_map(|index| ["--index".to_string(), index.display().to_string()]));
-    search_args.extend(roots);
     let search = SearchService::new(
         Launch {
             program: options.helper.clone(),
-            args: search_args,
+            args: helper::search_service_args(options.index.as_deref(), &roots, &settings),
             env: options.models.iter().map(|models| ("DIGUP_MODELS".to_string(), models.display().to_string())).collect(),
             log: Some(logs.join("search.log")),
             background: false,   // it answers typing
@@ -370,7 +389,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         let app = handle.clone();
         move |event| model_event(&app, event)
     });
-    // Previews show files from the chosen folders (and the helper's renders, once it says where the index is).
+    // Previews show files from the chosen folders (and the helper's renders, once it says where the index is). Code
+    // folders need none: a code result's preview is its text, which the helper reads (the "text" request).
     for root in &settings.folders {
         let _ = app.asset_protocol_scope().allow_directory(root, true);
     }
@@ -386,6 +406,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         model,
         model_state: Mutex::new(json!({"state": "checking"})),
         watcher: Mutex::new(None),
+        code_watcher: Mutex::new(None),
         status: Mutex::new(None),
         reloaded: Mutex::new(Instant::now()),
         debug_query_sent: AtomicBool::new(false),
@@ -436,47 +457,65 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// After setup or a change of folders: the search service, the watcher and indexing follow the new folders.
+/// After setup or a change of folders: the search service, the watchers and indexing follow the new folders and code
+/// folders. Indexing starts over with them (other arguments); code search turned off leaves the code index on disk,
+/// unsearched: the helpers keep it, and turning code search on again only reads what changed.
 fn apply_folders(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     let folders = shell.folders();
-    let (skipped, types) = {
-        let settings = shell.settings.lock().unwrap();
-        (settings.skipped.clone(), settings.skip_types.clone())
-    };
+    let settings = shell.settings.lock().unwrap().clone();
     for folder in &folders {
         let _ = app.asset_protocol_scope().allow_directory(folder, true);
     }
+    // A search service started from now on (the first, or after one died) gets them at launch; the running one is told.
+    shell.search.relaunch(shell.search_arguments());
     let search = shell.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = search.search.ask(json!({"op": "folders", "roots": folders, "skipped": skipped, "types": types})).await;
+        let request = json!({"op": "folders", "roots": folders, "skipped": settings.skipped, "types": settings.skip_types,
+                             "code_roots": settings.code_roots, "code_skipped": settings.code_skipped});
+        let _ = search.search.ask(request).await;
     });
+    let _ = app.emit("code-search", !shell.code_folders().is_empty());
     watch_folders(app);
 }
 
-/// Watches the folders, and indexes them now when the model is in.
+/// Watches the folders and code folders, and indexes them now when the model is in.
 fn watch_folders(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     let folders: Vec<PathBuf> = shell.folders().iter().map(PathBuf::from).collect();
-    if folders.is_empty() {
+    let code: Vec<PathBuf> = shell.code_folders().iter().map(PathBuf::from).collect();
+    *shell.watcher.lock().unwrap() = (!folders.is_empty()).then(|| {
+        let app = app.clone();
+        FolderWatcher::start(&folders, shell.options.index_folder(), Duration::from_secs(2), move || run_index(&app))
+    });
+    *shell.code_watcher.lock().unwrap() = (!code.is_empty()).then(|| {
+        let app = app.clone();
+        FolderWatcher::start(&code, shell.options.index_folder(), Duration::from_secs(60), move || sync_code(&app))
+    });
+    if !shell.has_folders() {
         set_status(app, "No folders chosen yet");
         return;
     }
-    let changed = {
-        let app = app.clone();
-        move || run_index(&app)
-    };
-    *shell.watcher.lock().unwrap() = Some(FolderWatcher::start(&folders, shell.options.index_folder(), changed));
     run_index(app);
 }
 
-/// Has the index helper sync and index, once there's a model and a folder.
+/// Has the index helper sync and index, once there's a model and a folder or code folder.
 fn run_index(app: &AppHandle) {
+    index_with(app, &["sync", "sync code"]);
+}
+
+/// The code folders changed: the index helper syncs the code index alone.
+fn sync_code(app: &AppHandle) {
+    index_with(app, &["sync code"]);
+}
+
+/// Starts the index helper (it syncs everything first), or asks the running one for `syncs`.
+fn index_with(app: &AppHandle, syncs: &[&str]) {
     let shell = app.state::<Arc<Shell>>();
-    if !shell.is_set_up() || shell.folders().is_empty() || !shell.model_ready() {
+    if !shell.is_set_up() || !shell.has_folders() || !shell.model_ready() {
         return;
     }
-    if let Err(error) = shell.index.run(&shell.index_launch()) {
+    if let Err(error) = shell.index.run(&shell.index_launch(), syncs) {
         set_status(app, &format!("Indexing couldn't start: {error}"));
     }
 }
@@ -755,7 +794,7 @@ fn model_event(app: &AppHandle, event: Value) {
     *shell.model_state.lock().unwrap() = state.clone();
     let _ = app.emit("model", state);
     if ready {
-        if shell.folders().is_empty() {
+        if !shell.has_folders() {
             set_status(app, "No folders chosen yet");
         }
         run_index(app);

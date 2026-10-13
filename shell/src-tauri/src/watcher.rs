@@ -1,5 +1,6 @@
-//! Watching the chosen folders: a change anywhere in them asks the index helper to sync, two seconds after the last one
-//! (a camera import or an unzip is a burst of events). `notify` uses ReadDirectoryChangesW on Windows, inotify on Linux,
+//! Watching the chosen folders: a change anywhere in them asks the index helper to sync once they've been quiet a while:
+//! two seconds for the folders (a camera import or an unzip is a burst of events), a minute for code (saves come in
+//! bursts while someone works, as the Mac app's `codeQuietSeconds` has it). `notify` uses ReadDirectoryChangesW on Windows, inotify on Linux,
 //! FSEvents on a Mac. Changes in DigUp's own index folder are passed over.
 
 use notify::{RecursiveMode, Watcher};
@@ -12,8 +13,10 @@ pub struct FolderWatcher {
 }
 
 impl FolderWatcher {
-    /// Watches `folders`; `changed` runs on the watcher's own thread after each burst of changes. Dropping it stops.
-    pub fn start(folders: &[PathBuf], ignore: Option<PathBuf>, changed: impl Fn() + Send + 'static) -> FolderWatcher {
+    /// Watches `folders`; `changed` runs on the watcher's own thread once a burst of changes has been `quiet` that
+    /// long. Dropping it stops.
+    pub fn start(folders: &[PathBuf], ignore: Option<PathBuf>, quiet: Duration, changed: impl Fn() + Send + 'static)
+        -> FolderWatcher {
         let (sender, receiver) = mpsc::channel::<()>();
         let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
             let Ok(event) = result else { return };
@@ -39,7 +42,7 @@ impl FolderWatcher {
         }
         std::thread::spawn(move || {
             while receiver.recv().is_ok() {
-                while receiver.recv_timeout(Duration::from_secs(2)).is_ok() {}
+                while receiver.recv_timeout(quiet).is_ok() {}
                 changed();
             }
         });

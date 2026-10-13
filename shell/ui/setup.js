@@ -1,6 +1,7 @@
 // DigUp's setup window: what to search and the shortcut, with the model downloading in the background from the moment
 // it opens (the shell starts that), as the Mac app's onboarding does. Folders show what's in them (`digup estimate`):
-// counts, not times, until the estimates are measured on more than the Mac.
+// counts, not times, until the estimates are measured on more than the Mac. Under them, code search's folders (the Mac
+// app's Settings → Code): none checked turns code search off.
 "use strict";
 
 const tauri = window.__TAURI__;
@@ -10,19 +11,23 @@ const isWindows = /Win/.test(navigator.platform);
 const PAGES = ["welcome", "folders", "shortcut", "ready"];
 
 const $ = (id) => document.getElementById(id);
-const folders = new Map();   // path → {checked, row, counts}
+const folders = new Map();       // path → {checked, row, counts}
+const codeFolders = new Map();   // the same, for code search
 let page = 0;
-let info = { offered: [], chosen: [], hotkey: "", model: { state: "checking" }, auto: false };
+let info = { offered: [], chosen: [], codeChosen: [], hotkey: "", model: { state: "checking" }, auto: false };
 
 async function start() {
   info = await invoke("setup_info");
   // The usual folders, then any chosen before (Choose Folders… after setup). On a first launch they start checked,
   // all but Downloads (much of what lands there is passing through).
   const chosen = new Set(info.chosen);
-  const firstTime = chosen.size === 0;
+  // Code folders alone count as set up: Choose Folders… then opens on the folders, the usual ones unchecked.
+  const firstTime = chosen.size === 0 && !(info.codeChosen || []).length;
   for (const path of info.offered) addFolder(path, firstTime ? !/[\\/]Downloads$/i.test(path) || info.auto : chosen.has(path));
   for (const path of info.chosen) if (!folders.has(path)) addFolder(path, true);
+  for (const path of info.codeChosen || []) addFolder(path, true, codeFolders);
   estimate([...folders.keys()]);
+  estimate([...codeFolders.keys()], codeFolders);
   showModel(info.model);
   tauri.event.listen("model", ({ payload }) => showModel(payload));
   showKeys(info.hotkey);
@@ -39,7 +44,8 @@ function render() {
   PAGES.forEach((name, index) => { $(name).hidden = index !== page; });
   $("back").hidden = page === 0;
   $("next").textContent = page === PAGES.length - 1 ? "Start" : "Continue";
-  $("next").disabled = page === 1 && !chosenFolders().length;
+  // Code folders alone are enough: DigUp then searches only code.
+  $("next").disabled = page === 1 && !chosenFolders().length && !chosenFolders(codeFolders).length;
 }
 
 $("next").addEventListener("click", async () => {
@@ -50,7 +56,7 @@ $("next").addEventListener("click", async () => {
   }
   $("next").disabled = true;
   try {
-    await invoke("finish_setup", { folders: chosenFolders() });
+    await invoke("finish_setup", { folders: chosenFolders(), codeFolders: chosenFolders(codeFolders) });
   } catch (error) {
     $("model").textContent = String(error);
     $("next").disabled = false;
@@ -73,14 +79,15 @@ async function clickThrough() {
 
 // MARK: Folders
 
-function addFolder(path, checked) {
+/// A row in the folders' list, or with `list` codeFolders, in the code folders'.
+function addFolder(path, checked, list = folders) {
   const row = document.createElement("label");
   row.className = "folder";
   const box = document.createElement("input");
   box.type = "checkbox";
   box.checked = checked;
   box.addEventListener("change", () => {
-    folders.get(path).checked = box.checked;
+    list.get(path).checked = box.checked;
     render();
   });
   const text = document.createElement("div");
@@ -95,27 +102,30 @@ function addFolder(path, checked) {
   const counts = document.createElement("div");
   counts.className = "counts";
   counts.textContent = "Counting…";
+  if (list === codeFolders) counts.title = CODE_HELP;
   row.append(box, text, counts);
-  $("folder-list").append(row);
-  folders.set(path, { checked, row, counts });
+  $(list === codeFolders ? "code-list" : "folder-list").append(row);
+  list.set(path, { checked, row, counts });
 }
 
-function chosenFolders() {
-  return [...folders].filter(([, folder]) => folder.checked).map(([path]) => path);
+function chosenFolders(list = folders) {
+  return [...list].filter(([, folder]) => folder.checked).map(([path]) => path);
 }
 
-async function estimate(paths) {
+/// What's in each folder, from the helper; for code folders, what code search reads there (`digup estimate --code`).
+async function estimate(paths, list = folders) {
   if (!paths.length) return;
+  const code = list === codeFolders;
   let answers = [];
   try {
-    answers = await invoke("estimate", { folders: paths });
+    answers = await invoke("estimate", { folders: paths, code });
   } catch (error) {
-    for (const path of paths) folders.get(path).counts.textContent = "";
+    for (const path of paths) list.get(path).counts.textContent = "";
     return;
   }
   for (const path of paths) {
     const answer = answers.find((item) => same(item.folder, path));
-    folders.get(path).counts.textContent = answer ? countsText(answer) : "";
+    list.get(path).counts.textContent = !answer ? "" : code ? codeText(answer) : countsText(answer);
   }
 }
 
@@ -140,12 +150,37 @@ function countsText(answer) {
   return parts.length ? parts.join(" · ") : "Nothing DigUp searches in it";
 }
 
-$("add-folder").addEventListener("click", async () => {
-  const picked = (await invoke("pick_folders")).filter((path) => !folders.has(path));
-  for (const path of picked) addFolder(path, true);
-  estimate(picked);
+const CODE_HELP = "About how much room the code index needs for it. DigUp reads the code once; after that, only what "
+  + "changes is read again.";
+
+/// "39 code files · about 370 KB of index"
+function codeText(answer) {
+  if (answer.readable === false) return "Can't read it";
+  const count = (answer.files || {}).code || 0;
+  if (!count) return "No code here";
+  const files = `${count.toLocaleString()} code ${count === 1 ? "file" : "files"}`;
+  return answer.bytes > 0 ? `${files} · about ${roughBytes(answer.bytes)} of index` : files;
+}
+
+/// Sizes to two figures, the way file managers count them (1 KB = 1,000 bytes): "370 KB", "1.2 GB".
+function roughBytes(count) {
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  let value = count, unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  const shown = value >= 100 ? Math.round(value / 10) * 10 : value >= 10 ? Math.round(value) : Number(value.toFixed(1));
+  return `${shown.toLocaleString()} ${units[unit]}`;
+}
+
+/// Folders from the system's picker into a list, checked, and their estimates asked for.
+async function addPicked(list) {
+  const picked = (await invoke("pick_folders", { code: list === codeFolders })).filter((path) => !list.has(path));
+  for (const path of picked) addFolder(path, true, list);
+  estimate(picked, list);
   render();
-});
+}
+
+$("add-folder").addEventListener("click", () => addPicked(folders));
+$("add-code-folder").addEventListener("click", () => addPicked(codeFolders));
 
 // MARK: The shortcut and the model
 

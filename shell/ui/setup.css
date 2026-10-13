@@ -80,6 +80,10 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .folder .path { font-size: 11px; color: var(--secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder .counts { font-size: 11px; color: var(--secondary); text-align: right; flex: none; max-width: 52%; }
 
+/* Code search's folders, under the others: a heading like the shortcut page's, closer to its list. */
+h3.section { margin: 26px 0 4px; }
+h3.section + .subtitle { margin-bottom: 12px; }
+
 button {
   font: inherit; font-size: 13px; color: var(--text); background: var(--card); border: 1px solid var(--line);
   border-radius: 7px; padding: 6px 16px;

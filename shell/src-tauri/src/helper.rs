@@ -67,11 +67,21 @@ impl Launch {
 // MARK: Arguments
 
 /// What `index-service` is told: the index, what's skipped, code search's folders (each with `--code-root`; none and
-/// there's no code index to keep), then the folders. Only code folders is fine: it keeps the code index alone.
-pub fn index_service_args(index: Option<&Path>, folders: &[String], settings: &Settings) -> Vec<String> {
+/// there's no code index to keep), then the folders. Only code folders is fine: it keeps the code index alone. With
+/// `prune` (the folders changed), files under none of them leave the indexes, as the Mac app's `pruneWanted` has it.
+pub fn index_service_args(index: Option<&Path>, folders: &[String], settings: &Settings, prune: bool) -> Vec<String> {
     let mut args = vec!["index-service".to_string(), "--backfill".to_string()];
+    if prune {
+        args.push("--prune".to_string());
+    }
     args.extend(chosen_args(index, folders, settings));
     args
+}
+
+/// Two launches of `index-service` that do the same work: the same folders, pruning first or not.
+pub fn same_work(one: &[String], other: &[String]) -> bool {
+    let work = |args: &[String]| args.iter().filter(|arg| *arg != "--prune").cloned().collect::<Vec<_>>();
+    work(one) == work(other)
 }
 
 /// What `search-service` is told: the same folders, so that it shows what indexing keeps, and nothing from a folder
@@ -207,7 +217,8 @@ impl SearchService {
 
 /// `digup index-service`: syncs the index with the folders, indexes what's new, and exits once it's done. `run` starts
 /// it, asks the running one to sync again ("sync" for the folders, "sync code" for the code folders), or, when the
-/// folders changed (another launch), starts it over with them. A new one syncs both by itself.
+/// folders changed (another launch), starts it over with them. A new one syncs both by itself. True when it started
+/// one.
 pub struct IndexService {
     running: Mutex<Option<(Child, ChildStdin, Vec<String>)>>,
     on_event: EventSink,
@@ -218,14 +229,14 @@ impl IndexService {
         IndexService { running: Mutex::new(None), on_event: Arc::new(on_event) }
     }
 
-    pub fn run(&self, launch: &Launch, syncs: &[&str]) -> Result<(), String> {
+    pub fn run(&self, launch: &Launch, syncs: &[&str]) -> Result<bool, String> {
         let mut running = self.running.lock().unwrap();
         if let Some((child, stdin, args)) = running.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
-                if *args == launch.args {
+                if same_work(args, &launch.args) {
                     let mut asked = syncs.iter().try_for_each(|sync| writeln!(stdin, "{sync}"));
                     asked = asked.and_then(|_| stdin.flush());
-                    return asked.map_err(|error| error.to_string());
+                    return asked.map(|_| false).map_err(|error| error.to_string());
                 }
                 let (child, stdin, _) = running.take().unwrap();
                 stop(child, stdin, "stop");
@@ -243,7 +254,7 @@ impl IndexService {
             on_event(json!({"event": "exit"}));
         });
         *running = Some((child, stdin, launch.args.clone()));
-        Ok(())
+        Ok(true)
     }
 
     pub fn stop(&self) {
@@ -318,13 +329,27 @@ mod tests {
     #[test]
     fn index_service_gets_the_code_folders() {
         let settings = chosen();
-        let args = index_service_args(Some(Path::new("/idx")), &settings.folders, &settings);
+        let args = index_service_args(Some(Path::new("/idx")), &settings.folders, &settings, false);
         assert_eq!(args, [
             "index-service", "--backfill", "--index", "/idx",
             "--exclude", "/home/me/Documents/old", "--exclude-ext", "heic",
             "--code-root", "/home/me/src", "--code-root", "/home/me/work", "--code-exclude", "/home/me/src/vendor",
             "/home/me/Documents",
         ]);
+    }
+
+    #[test]
+    fn a_change_of_folders_prunes_once() {
+        let settings = chosen();
+        let pruning = index_service_args(None, &settings.folders, &settings, true);
+        assert_eq!(&pruning[..3], ["index-service", "--backfill", "--prune"]);
+        let plain = index_service_args(None, &settings.folders, &settings, false);
+        assert!(!plain.contains(&"--prune".to_string()));
+        // A helper started to prune is still the one for the same folders: a later sync doesn't start it over.
+        assert!(same_work(&pruning, &plain));
+        let mut other = settings.clone();
+        other.code_roots.pop();
+        assert!(!same_work(&plain, &index_service_args(None, &other.folders, &other, false)));
     }
 
     #[test]
@@ -342,14 +367,15 @@ mod tests {
     #[test]
     fn code_folders_alone_are_enough() {
         let settings = Settings { code_roots: vec!["/home/me/src".into()], ..Settings::default() };
-        assert_eq!(index_service_args(None, &[], &settings), ["index-service", "--backfill", "--code-root", "/home/me/src"]);
+        assert_eq!(index_service_args(None, &[], &settings, false),
+                   ["index-service", "--backfill", "--code-root", "/home/me/src"]);
         assert_eq!(search_service_args(None, &[], &settings), ["search-service", "--code-root", "/home/me/src"]);
     }
 
     #[test]
     fn without_code_folders_there_is_no_code_flag() {
         let settings = Settings { folders: vec!["/home/me/Pictures".into()], ..Settings::default() };
-        let args = index_service_args(None, &settings.folders, &settings);
+        let args = index_service_args(None, &settings.folders, &settings, false);
         assert!(!args.iter().any(|arg| arg.starts_with("--code")), "{args:?}");
         let args = search_service_args(None, &settings.folders, &settings);
         assert!(!args.iter().any(|arg| arg.starts_with("--code")), "{args:?}");

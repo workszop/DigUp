@@ -43,12 +43,61 @@ impl Settings {
         std::fs::rename(temporary, path)
     }
 
-    /// The code folders from now on (none turns code search off). A skipped folder goes with the code folder it was
-    /// in, as `removeCodeFolder` has it in the Mac app.
+    /// The code folders from now on (none turns code search off), as the Mac app's `applyCodeFolders` keeps them
+    /// (`FolderSelection(chosen:)`): each written one way, once, and none inside another that already searches it
+    /// whole. A skipped folder goes with the code folder it was in, as `removeCodeFolder` has it.
     pub fn set_code_folders(&mut self, roots: Vec<String>) {
-        self.code_skipped.retain(|skip| roots.iter().any(|root| Path::new(skip).starts_with(root)));
-        self.code_roots = roots;
+        let roots = unique(roots.iter().map(|root| folder_path(root)));
+        let skipped = unique(self.code_skipped.iter().map(|skip| folder_path(skip)));
+        let searched_whole_by = |folder: &str, other: &str| {
+            let skipped_there = |skip: &String| is_inside(skip, other) && (folder == skip || is_inside(folder, skip));
+            is_inside(folder, other) && !skipped.iter().any(skipped_there)
+        };
+        let kept: Vec<String> = roots.iter()
+            .filter(|root| !roots.iter().any(|other| searched_whole_by(root, other)))
+            .cloned()
+            .collect();
+        self.code_skipped = skipped.into_iter().filter(|skip| kept.iter().any(|root| is_inside(skip, root))).collect();
+        self.code_roots = kept;
     }
+}
+
+// MARK: Folder paths
+
+/// A folder as the settings keep it: "~" for the home folder expanded, and no separator at its end (the Mac app's
+/// `AppSettings.folderURL`, links left as they are).
+pub fn folder_path(path: &str) -> String {
+    let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok();
+    folder_path_in(path, home.as_deref())
+}
+
+fn folder_path_in(path: &str, home: Option<&str>) -> String {
+    let path = path.trim();
+    let path = match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => format!("{home}{rest}"),
+        _ => path.to_string(),
+    };
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    // The root of a drive or of everything keeps its separator ("/", "C:\").
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        return path[..(trimmed.len() + 1).min(path.len())].to_string();
+    }
+    trimmed.to_string()
+}
+
+/// `folder` is somewhere under `other` (not `other` itself).
+fn is_inside(folder: &str, other: &str) -> bool {
+    folder != other && Path::new(folder).starts_with(other)
+}
+
+fn unique(paths: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen = Vec::new();
+    for path in paths {
+        if !seen.contains(&path) {
+            seen.push(path);
+        }
+    }
+    seen
 }
 
 #[cfg(test)]
@@ -109,5 +158,29 @@ mod tests {
         settings.set_code_folders(Vec::new());
         assert!(settings.code_roots.is_empty());
         assert!(settings.code_skipped.is_empty());
+    }
+
+    #[test]
+    fn folders_are_kept_without_tilde_or_trailing_separator() {
+        let home = Some("/home/me");
+        assert_eq!(folder_path_in("~/src/", home), "/home/me/src");
+        assert_eq!(folder_path_in("  ~  ", home), "/home/me");
+        assert_eq!(folder_path_in("/work//", home), "/work");
+        assert_eq!(folder_path_in("/", home), "/");
+        assert_eq!(folder_path_in("~other/x", home), "~other/x");   // another user's home isn't looked up
+        assert_eq!(folder_path_in("C:\\Code\\", None), "C:\\Code");
+        assert_eq!(folder_path_in("C:\\", None), "C:\\");
+    }
+
+    #[test]
+    fn a_code_folder_inside_another_goes_unless_it_is_skipped_there() {
+        let mut settings = Settings {
+            code_skipped: vec!["/src/vendor/".into()],
+            ..Settings::default()
+        };
+        settings.set_code_folders(vec!["/src/".into(), "/src/app".into(), "/src/vendor/lib".into(), "/src".into(),
+                                       "/work".into()]);
+        assert_eq!(settings.code_roots, ["/src", "/src/vendor/lib", "/work"]);
+        assert_eq!(settings.code_skipped, ["/src/vendor"]);
     }
 }

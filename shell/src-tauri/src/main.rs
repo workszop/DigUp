@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, W
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
-use watcher::FolderWatcher;
+use watcher::{FolderWatcher, Settle};
 
 const PANEL_WIDTH: f64 = 780.0;
 const FIELD_HEIGHT: f64 = 56.0;
@@ -47,6 +47,10 @@ struct Shell {
     watcher: Mutex<Option<FolderWatcher>>,
     /// Code search's folders have their own: their changes are synced a while after they settle.
     code_watcher: Mutex<Option<FolderWatcher>>,
+    /// Held while the watchers are made (off the main thread: a watch walks the whole tree), one change at a time.
+    rewatching: Mutex<()>,
+    /// The folders changed: the next index helper started prunes what's under none of them (`--prune`).
+    prune_wanted: AtomicBool,
     /// The tray menu's first line: what's going on.
     status: Mutex<Option<MenuItem<Wry>>>,
     /// When the search service last reloaded the index (while indexing, at most every few seconds).
@@ -98,7 +102,9 @@ impl Shell {
     /// `index-service` for the folders and code folders as they are now.
     fn index_launch(&self) -> Launch {
         let settings = self.settings.lock().unwrap().clone();
-        self.launch(helper::index_service_args(self.options.index.as_deref(), &self.folders(), &settings), "index.log")
+        let prune = self.prune_wanted.load(Ordering::SeqCst);
+        let args = helper::index_service_args(self.options.index.as_deref(), &self.folders(), &settings, prune);
+        self.launch(args, "index.log")
     }
 
     /// `search-service`'s arguments for the folders and code folders as they are now.
@@ -128,7 +134,8 @@ async fn ask(shell: State<'_, Arc<Shell>>, request: Value) -> Result<Value, Stri
 /// pass's seconds, the rest of long files, subfolders. With `code`, what code search would read there and about how
 /// much room its index takes (`--code`: "bytes"). For setup.
 #[tauri::command]
-async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Option<bool>) -> Result<Vec<Value>, String> {
+async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Option<bool>)
+    -> Result<Vec<Value>, String> {
     let helper = shell.options.helper.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut command = std::process::Command::new(&helper);
@@ -337,8 +344,8 @@ fn main() {
         )
         .setup(move |app| setup(app, options))
         .invoke_handler(tauri::generate_handler![
-            ask, estimate, setup_info, pick_folders, finish_setup, code_search_on, open_path, open_hit, reveal, hide_panel,
-            choose_folders, panel_height,
+            ask, estimate, setup_info, pick_folders, finish_setup, code_search_on, open_path, open_hit, reveal,
+            hide_panel, choose_folders, panel_height,
             debug_query, debug_report
         ])
         .build(tauri::generate_context!())
@@ -407,6 +414,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         model_state: Mutex::new(json!({"state": "checking"})),
         watcher: Mutex::new(None),
         code_watcher: Mutex::new(None),
+        rewatching: Mutex::new(()),
+        prune_wanted: AtomicBool::new(false),
         status: Mutex::new(None),
         reloaded: Mutex::new(Instant::now()),
         debug_query_sent: AtomicBool::new(false),
@@ -458,8 +467,9 @@ fn wayland_session() -> bool {
 }
 
 /// After setup or a change of folders: the search service, the watchers and indexing follow the new folders and code
-/// folders. Indexing starts over with them (other arguments); code search turned off leaves the code index on disk,
-/// unsearched: the helpers keep it, and turning code search on again only reads what changed.
+/// folders. Indexing starts over with them (other arguments), and that helper prunes what's under none of them, as the
+/// Mac app does. Code search turned off deletes the code index (the Mac app's `removeCodeIndexIfAsked`): turning it on
+/// again reads the code again.
 fn apply_folders(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     let folders = shell.folders();
@@ -467,31 +477,77 @@ fn apply_folders(app: &AppHandle) {
     for folder in &folders {
         let _ = app.asset_protocol_scope().allow_directory(folder, true);
     }
-    // A search service started from now on (the first, or after one died) gets them at launch; the running one is told.
-    shell.search.relaunch(shell.search_arguments());
-    let search = shell.clone();
-    tauri::async_runtime::spawn(async move {
-        let request = json!({"op": "folders", "roots": folders, "skipped": settings.skipped, "types": settings.skip_types,
-                             "code_roots": settings.code_roots, "code_skipped": settings.code_skipped});
-        let _ = search.search.ask(request).await;
+    shell.prune_wanted.store(true, Ordering::SeqCst);
+    let _ = app.emit("code-search", !settings.code_roots.is_empty());
+    // Stopping the helpers waits for them, and watching walks the folders: neither belongs on the main thread.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if settings.code_roots.is_empty() {
+            remove_code_index(&shell);
+        }
+        // A search service started from now on (the first, or after one died) gets them at launch; the running one
+        // is told.
+        shell.search.relaunch(shell.search_arguments());
+        let request = json!({"op": "folders", "roots": folders, "skipped": settings.skipped,
+                             "types": settings.skip_types, "code_roots": settings.code_roots,
+                             "code_skipped": settings.code_skipped});
+        let _ = tauri::async_runtime::block_on(shell.search.ask(request));
+        rewatch(&app);
     });
-    let _ = app.emit("code-search", !shell.code_folders().is_empty());
-    watch_folders(app);
 }
 
-/// Watches the folders and code folders, and indexes them now when the model is in.
+/// Code search is off: the code index goes, once no helper has it open (both stop; the search service starts again
+/// with the next request, without it).
+fn remove_code_index(shell: &Shell) {
+    let Some(file) = shell.options.index_folder().map(|index| index.join("code.sqlite")) else { return };
+    if !file.exists() {
+        return;
+    }
+    shell.index.stop();
+    shell.search.stop();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{suffix}", file.display()));
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("digup-shell: can't delete {}: {error}", path.display());
+            }
+        }
+    }
+    eprintln!("digup-shell: code search off, the code index was deleted");
+}
+
+/// Watches the folders and code folders, and indexes them now when the model is in. Off the main thread: watching
+/// walks the folders.
 fn watch_folders(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || rewatch(&app));
+}
+
+fn rewatch(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
+    let _one_at_a_time = shell.rewatching.lock().unwrap();
     let folders: Vec<PathBuf> = shell.folders().iter().map(PathBuf::from).collect();
     let code: Vec<PathBuf> = shell.code_folders().iter().map(PathBuf::from).collect();
-    *shell.watcher.lock().unwrap() = (!folders.is_empty()).then(|| {
+    // The old watchers stop first, so a change now doesn't come twice.
+    *shell.watcher.lock().unwrap() = None;
+    *shell.code_watcher.lock().unwrap() = None;
+    // A change in the folders syncs them alone (the code folders have their own watcher, which waits longer).
+    let watcher = (!folders.is_empty()).then(|| {
         let app = app.clone();
-        FolderWatcher::start(&folders, shell.options.index_folder(), Duration::from_secs(2), move || run_index(&app))
+        let settle = Settle { quiet: Duration::from_secs(2), longest: None };
+        let sync = move || index_with(&app, &["sync"]);
+        FolderWatcher::start(&folders, shell.options.index_folder(), settle, false, sync)
     });
-    *shell.code_watcher.lock().unwrap() = (!code.is_empty()).then(|| {
+    *shell.watcher.lock().unwrap() = watcher;
+    // Code changes all the time while someone works on it: synced after a quiet minute, or every ten minutes at most
+    // (the Mac app's codeQuietSeconds and codeLongestWait).
+    let code_watcher = (!code.is_empty()).then(|| {
         let app = app.clone();
-        FolderWatcher::start(&code, shell.options.index_folder(), Duration::from_secs(60), move || sync_code(&app))
+        let settle = Settle { quiet: Duration::from_secs(60), longest: Some(Duration::from_secs(600)) };
+        let sync = move || index_with(&app, &["sync code"]);
+        FolderWatcher::start(&code, shell.options.index_folder(), settle, true, sync)
     });
+    *shell.code_watcher.lock().unwrap() = code_watcher;
     if !shell.has_folders() {
         set_status(app, "No folders chosen yet");
         return;
@@ -499,14 +555,10 @@ fn watch_folders(app: &AppHandle) {
     run_index(app);
 }
 
-/// Has the index helper sync and index, once there's a model and a folder or code folder.
+/// Has the index helper sync both indexes and index, once there's a model and a folder or code folder: at launch,
+/// after a change of folders, when the model is in, and Index Now.
 fn run_index(app: &AppHandle) {
     index_with(app, &["sync", "sync code"]);
-}
-
-/// The code folders changed: the index helper syncs the code index alone.
-fn sync_code(app: &AppHandle) {
-    index_with(app, &["sync code"]);
 }
 
 /// Starts the index helper (it syncs everything first), or asks the running one for `syncs`.
@@ -515,8 +567,12 @@ fn index_with(app: &AppHandle, syncs: &[&str]) {
     if !shell.is_set_up() || !shell.has_folders() || !shell.model_ready() {
         return;
     }
-    if let Err(error) = shell.index.run(&shell.index_launch(), syncs) {
-        set_status(app, &format!("Indexing couldn't start: {error}"));
+    let launch = shell.index_launch();
+    match shell.index.run(&launch, syncs) {
+        // That helper prunes; the next ones needn't.
+        Ok(true) if launch.args.iter().any(|arg| arg == "--prune") => shell.prune_wanted.store(false, Ordering::SeqCst),
+        Ok(_) => {}
+        Err(error) => set_status(app, &format!("Indexing couldn't start: {error}")),
     }
 }
 

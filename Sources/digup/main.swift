@@ -578,7 +578,16 @@ do {
     case "status": try status(args)
     case "speed": speed(args)
     case "eval": try evaluate(args)
-    case "index-service": exit(try indexService(args))
+    case "index-service":
+        let code = try indexService(args)
+        #if os(Linux)
+        // glibc's exit flushes every stream, stdin too, under the lock that the thread reading commands holds while
+        // it waits for a line: the helper would never end, and the app's next "sync" would go to no one. Its events
+        // are written straight to the file descriptor, so nothing is left to flush.
+        _exit(code)
+        #else
+        exit(code)
+        #endif
     case "worker": exit(workerService(args))
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))

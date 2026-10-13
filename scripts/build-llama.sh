@@ -5,9 +5,10 @@
 # a venv in Vendor/ (needs uv). Does nothing when that build is already there; build.sh runs it every time.
 # On Linux and Windows it builds shared libraries instead, with ggml's backends as modules loaded at run
 # time (GGML_BACKEND_DL): the CPU variants always, CUDA when nvcc is found (CUDACXX, or on PATH; CUDA_ARCHS picks the GPU
-# architectures, default native), else Vulkan when its SDK is. LLAMA_SOURCE / LLAMA_BUILD point at an existing clone and
-# build folder. On Windows it runs in Git for Windows' bash inside the MSVC environment (vcvars64) and
-# leaves DLLs with their import libraries.
+# architectures, default native), else Vulkan when its SDK is; FLAVOR=cpu, cuda or vulkan picks one instead (a CPU build
+# on a machine that also has glslc, say). LLAMA_SOURCE / LLAMA_BUILD point at an existing clone and build folder. On
+# Windows it runs in Git for Windows' bash inside the MSVC environment (vcvars64) and leaves DLLs with their import
+# libraries.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG=b11461   # the first tags with EmbeddingGemma 2 (text + vision + audio) are b11452+
@@ -22,6 +23,11 @@ OUT=Vendor/llama
 OS=$(uname -s)
 if [[ $OS == Darwin ]]; then
   FLAVOR=metal
+elif [[ -n "${FLAVOR:-}" ]]; then
+  case $FLAVOR in
+    cpu|cuda|vulkan) ;;
+    *) echo "FLAVOR is cpu, cuda or vulkan, not $FLAVOR" >&2; exit 1 ;;
+  esac
 elif command -v "${CUDACXX:-nvcc}" > /dev/null; then
   FLAVOR=cuda
 elif command -v glslc > /dev/null; then

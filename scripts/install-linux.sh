@@ -65,16 +65,30 @@ for tool in ffmpeg ffprobe; do
   [[ -x "$FFMPEG_DIR/$tool" ]] || { echo "build it first: $FFMPEG_DIR/$tool is missing (scripts/fetch-vendor.sh fetches it)"; exit 1; }
 done
 
-"$SYSTEMCTL" --user stop digup.service 2> /dev/null || true
-mkdir -p "$OPT" "$BIN" "$(dirname "$UNIT")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
+# The new DigUp is put together beside the old one and checked there; only then does it replace the old one, whole.
+# An update leaves nothing of the last build behind (a llama.cpp backend it no longer has would still be loaded), and a
+# failed check leaves the installed DigUp, and the running service, as they were.
+STAGE="$OPT.new"
+rm -rf "$STAGE"
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE" "$BIN" "$(dirname "$UNIT")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
 # Beside the programs: digup finds its libraries there ($ORIGIN rpath) and digup-shell finds digup there.
-install -m 755 "$HELPER" "$SHELL_BIN" "$OPT/"
+install -m 755 "$HELPER" "$SHELL_BIN" "$STAGE/"
 # The engine needs ffmpeg 8.1 or newer, so it takes its own, which it looks for beside itself first.
-install -m 755 "$FFMPEG_DIR/ffmpeg" "$FFMPEG_DIR/ffprobe" "$OPT/"
-cp -a "$REPO"/Vendor/llama/lib/*.so* "$REPO"/Vendor/pdfium/lib/*.so "$OPT/"
+install -m 755 "$FFMPEG_DIR/ffmpeg" "$FFMPEG_DIR/ffprobe" "$STAGE/"
+cp -a "$REPO"/Vendor/llama/lib/*.so* "$REPO"/Vendor/pdfium/lib/*.so "$STAGE/"
 # A library this machine lacks would only show up as a service that never starts, so say so now, before enabling it.
 if [[ "${DIGUP_SKIP_LDD:-}" != 1 ]]; then
-  missing="$(for program in digup digup-shell; do ldd "$OPT/$program" 2> /dev/null | awk '/not found/ { print $1 }'; done | sort -u)"
+  missing=""
+  for program in digup digup-shell; do
+    if ! linked="$(ldd "$STAGE/$program" 2>&1)"; then
+      echo "DigUp couldn't check the libraries $program needs (ldd failed):"
+      sed 's/^/  /' <<< "$linked"
+      exit 1
+    fi
+    missing+="$(awk '/not found/ { print $1 }' <<< "$linked")"$'\n'
+  done
+  missing="$(sort -u <<< "$missing" | sed '/^$/d')"
   if [[ -n "$missing" ]]; then
     echo "DigUp needs libraries this machine does not have:"
     sed 's/^/  /' <<< "$missing"
@@ -82,6 +96,9 @@ if [[ "${DIGUP_SKIP_LDD:-}" != 1 ]]; then
     exit 1
   fi
 fi
+"$SYSTEMCTL" --user stop digup.service 2> /dev/null || true
+rm -rf "$OPT"
+mv "$STAGE" "$OPT"
 ln -sfn "$OPT/digup" "$BIN/digup"
 ln -sfn "$OPT/digup-shell" "$BIN/digup-shell"
 install -m 644 "$REPO/shell/src-tauri/icons/128x128.png" "$ICON"

@@ -38,6 +38,7 @@ for f in .local/opt/digup/digup .local/opt/digup/digup-shell .local/opt/digup/ff
          .local/share/icons/hicolor/128x128/apps/digup.png .config/systemd/user/digup.service; do
   [[ -e "$HOME/$f" ]] || fail "missing $f"
 done
+[[ ! -e "$OPT.new" ]] || fail "the staging folder was left behind"
 valid_shortcuts "new file" 1
 # Paths go into the menu entry and the unit quoted, so a HOME with a space in it still starts DigUp.
 grep -qxF "Exec=\"$OPT/digup-shell\" --toggle" "$HOME/.local/share/applications/digup.desktop" || fail "menu entry Exec not quoted"
@@ -45,6 +46,15 @@ grep -qxF "ExecStart=\"$OPT/digup-shell\"" "$HOME/.config/systemd/user/digup.ser
 if command -v desktop-file-validate > /dev/null; then
   desktop-file-validate "$HOME/.local/share/applications/digup.desktop" || fail "menu entry doesn't validate"
 fi
+
+# MARK: An update
+
+# A library the last build had and this one doesn't (another llama.cpp backend) is gone after an update. Its name is
+# one no build ships, so the check holds whichever backend Vendor/llama has now.
+touch "$OPT/libggml-gone-backend.so"
+install_digup
+[[ ! -e "$OPT/libggml-gone-backend.so" ]] || fail "an update kept a library the build no longer has"
+[[ -x "$OPT/digup" && ! -e "$OPT.new" ]] || fail "update left the install incomplete"
 
 # MARK: The user's shortcuts
 
@@ -88,12 +98,25 @@ grep -q 'clippy.sh pick' "$SHORTCUTS" || fail "uninstall removed the user's shor
 
 # MARK: The library check
 
-# A library the programs need but this machine lacks stops the install, naming it, before the service is enabled.
-# A stand-in ldd makes that deterministic, whatever this host has installed.
-mkdir -p "$ROOT/ldd-missing"
+# A library the programs need but this machine lacks stops the install, naming it, before the service is touched, and
+# the DigUp already installed stays as it was. A stand-in ldd makes that deterministic, whatever this host has.
+install_digup
+mkdir -p "$ROOT/ldd-missing" "$ROOT/ldd-broken"
 printf '#!/bin/sh\necho "\tlibfake.so.9 => not found"\n' > "$ROOT/ldd-missing/ldd"; chmod +x "$ROOT/ldd-missing/ldd"
+printf '#!/bin/sh\necho "ldd: exited unexpectedly" >&2\nexit 1\n' > "$ROOT/ldd-broken/ldd"; chmod +x "$ROOT/ldd-broken/ldd"
+before="$(sha256sum "$OPT/digup")"
+: > "$SYSTEMCTL_LOG"
 if out="$(env -u DIGUP_SKIP_LDD PATH="$ROOT/ldd-missing:$PATH" "$REPO/scripts/install-linux.sh" 2>&1)"; then
   fail "install succeeded with a library missing"
 fi
 grep -q 'libfake.so.9' <<< "$out" || fail "missing library not named: $out"
+[[ "$(sha256sum "$OPT/digup")" == "$before" ]] || fail "a failed library check changed the installed DigUp"
+[[ ! -e "$OPT.new" ]] || fail "a failed library check left the staging folder"
+[[ ! -s "$SYSTEMCTL_LOG" ]] || fail "a failed library check touched the service: $(cat "$SYSTEMCTL_LOG")"
+# An ldd that can't run at all says so (it used to end the install without a word).
+if out="$(env -u DIGUP_SKIP_LDD PATH="$ROOT/ldd-broken:$PATH" "$REPO/scripts/install-linux.sh" 2>&1)"; then
+  fail "install succeeded with ldd failing"
+fi
+grep -q "couldn't check the libraries" <<< "$out" || fail "a failing ldd went unexplained: $out"
+[[ -x "$OPT/digup" && ! -e "$OPT.new" && ! -s "$SYSTEMCTL_LOG" ]] || fail "a failing ldd changed the install or the service"
 echo "install-linux: ok"

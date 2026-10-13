@@ -242,6 +242,13 @@ fn hide_panel(app: AppHandle) {
     }
 }
 
+/// The gear in the panel: the panel gets out of the way, then the window the tray's "Choose Folders…" opens appears.
+#[tauri::command]
+fn choose_folders(app: AppHandle) -> Result<(), String> {
+    hide_panel(app.clone());
+    show_setup(&app).map_err(|error| error.to_string())
+}
+
 /// The panel grows to show results and shrinks back to its field.
 #[tauri::command]
 fn panel_height(app: AppHandle, height: f64) {
@@ -300,7 +307,8 @@ fn main() {
         )
         .setup(move |app| setup(app, options))
         .invoke_handler(tauri::generate_handler![
-            ask, estimate, setup_info, pick_folders, finish_setup, open_path, open_hit, reveal, hide_panel, panel_height,
+            ask, estimate, setup_info, pick_folders, finish_setup, open_path, open_hit, reveal, hide_panel, choose_folders,
+            panel_height,
             debug_query, debug_report
         ])
         .build(tauri::generate_context!())

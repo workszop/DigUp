@@ -36,6 +36,7 @@ const KIND_TITLE = { screenshot: "Screenshot", image: "Image", pdf: "PDF", doc: 
 const $ = (id) => document.getElementById(id);
 const $query = $("query"), $body = $("body"), $list = $("list"), $preview = $("preview");
 const $footer = $("footer"), $summary = $("summary"), $keys = $("keys"), $activity = $("activity");
+const $folders = $("folders");
 
 const state = {
   generation: 0,
@@ -161,6 +162,10 @@ function openSelected() {
 function revealSelected() {
   const hit = selectedHit();
   if (hit) invoke("reveal", { path: hit.path }).catch(failed);
+}
+
+function chooseFolders() {
+  invoke("choose_folders").catch(failed);
 }
 
 // MARK: Drawing
@@ -543,9 +548,18 @@ ICONS.screenshot = ICONS.image;
 
 $query.addEventListener("input", queryChanged);
 
+// The gear never takes the caret from the field; the window it opens is the tray's Choose Folders.
+$folders.addEventListener("mousedown", (event) => event.preventDefault());
+$folders.addEventListener("click", chooseFolders);
+
 document.addEventListener("keydown", (event) => {
   if (event.isComposing) return; // an input method is composing: its keys
   const modifier = isMac ? event.metaKey : event.ctrlKey;
+  if (modifier && event.key === ",") {
+    event.preventDefault();
+    chooseFolders();
+    return;
+  }
   switch (event.key) {
     case "Escape":
       event.preventDefault();

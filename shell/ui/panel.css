@@ -104,6 +104,38 @@ html, body {
   white-space: nowrap;
 }
 
+/* The gear at the field's right end: quiet until the pointer or the keyboard reaches it. */
+
+.folders {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+}
+
+.folders svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.folders:hover, .folders:focus-visible {
+  background: var(--chip);
+  color: var(--text);
+}
+
+.folders:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+
 /* Results and preview */
 
 .body {

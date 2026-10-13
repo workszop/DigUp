@@ -52,6 +52,17 @@ const check = (what, actual, expected) => {
 };
 
 check("starts empty", await body("phase"), "empty");
+
+// The gear opens Choose Folders: by click (without taking the caret from the field) and by Ctrl+, from anywhere.
+const folderCalls = () => page.evaluate(() => window.__calls.filter((call) => call.command === "choose_folders").length);
+await page.focus("#query");
+await page.click("#folders");
+check("gear click asks for Choose Folders", await folderCalls(), 1);
+check("gear click leaves the caret in the field", await page.evaluate(() => document.activeElement.id), "query");
+await page.keyboard.press("Control+,");
+check("Ctrl+, asks for Choose Folders", await folderCalls(), 2);
+await page.keyboard.press("Control+.");
+check("other Ctrl keys don't", await folderCalls(), 2);
 await page.fill("#query", "volcano");
 await page.waitForFunction(() => document.body.dataset.phase === "meaning");
 check("meaning results", await body("count"), "3");

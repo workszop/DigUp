@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod helper;
+mod open;
 mod options;
 mod settings;
 mod watcher;
@@ -14,6 +15,7 @@ use options::{Options, DEFAULT_HOTKEY};
 use serde_json::{json, Value};
 use settings::Settings;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -191,6 +193,29 @@ fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|error| error.to_string())
 }
 
+/// Opens a result at its page, moment or line when a program here can be told it (Linux), else in its default app.
+#[tauri::command]
+fn open_hit(app: AppHandle, shell: State<'_, Arc<Shell>>, target: open::Target) -> Result<(), String> {
+    hide_panel(app.clone());
+    let editor = shell.settings.lock().unwrap().editor.clone();
+    let planned = if cfg!(target_os = "linux") { open::command(&target, &editor, open::on_path) } else { None };
+    let Some(command) = planned else {
+        return app.opener().open_path(target.path, None::<&str>).map_err(|error| error.to_string());
+    };
+    let mut child = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("can't run {}: {error}", command[0]))?;
+    // Reaped when it quits, so it doesn't linger as a zombie while DigUp runs.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Shows a result in the file manager, selected.
 #[tauri::command]
 fn reveal(app: AppHandle, path: String) -> Result<(), String> {
@@ -257,7 +282,7 @@ fn main() {
         )
         .setup(move |app| setup(app, options))
         .invoke_handler(tauri::generate_handler![
-            ask, estimate, setup_info, pick_folders, finish_setup, open_path, reveal, hide_panel, panel_height,
+            ask, estimate, setup_info, pick_folders, finish_setup, open_path, open_hit, reveal, hide_panel, panel_height,
             debug_query, debug_report
         ])
         .build(tauri::generate_context!())

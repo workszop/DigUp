@@ -16,6 +16,8 @@ pub struct Settings {
     pub skip_types: Vec<String>,
     /// The panel's hotkey (Tauri's accelerator form); empty: the default.
     pub hotkey: String,
+    /// The program code results open in ("zed", "code", "idea"...); empty: the first one installed.
+    pub editor: String,
     /// Onboarding is done: the shell starts in the tray.
     pub set_up: bool,
 }

@@ -143,7 +143,10 @@ function toggleWeaker() {
 
 function openSelected() {
   const hit = selectedHit();
-  if (hit) invoke("open_path", { path: hit.path }).catch(failed);
+  if (!hit) return;
+  const target = { path: hit.path, kind: hit.kind, segment: hit.segment ?? null, loc: hit.loc ?? null,
+                   focus: hit.focus ?? null };
+  invoke("open_hit", { target }).catch(failed);
 }
 
 function revealSelected() {

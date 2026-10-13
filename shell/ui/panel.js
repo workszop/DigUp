@@ -62,6 +62,7 @@ function queryChanged() {
   clearTimeout(state.timer);
   state.navigated = false;
   state.error = null;
+  publish();   // data-error clears now, not when the next answer comes
   const typed = $query.value.trim();
   const code = /^code:/i.test(typed);
   const text = code ? typed.slice(5).trim() : typed;

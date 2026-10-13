@@ -26,7 +26,9 @@ await page.addInitScript((hits) => {
         window.__calls.push({ command, args });
         if (command !== "ask") return null;
         const request = args.request;
-        if (request.op === "search") return request.q === "boom" ? Promise.reject("search failed") : { hits, strong: 2, meaning: request.meaning };
+        if (request.op === "search" && request.q === "boom") return Promise.reject("search failed");
+        if (request.op === "search" && request.q === "slow") return new Promise(() => {}); // an answer that never comes
+        if (request.op === "search") return { hits, strong: 2, meaning: request.meaning };
         if (request.op === "render") return Promise.reject("no pictures here");
         return {};
       },
@@ -64,6 +66,8 @@ check("enter opens at the page", opened, [{ path: "/t/docs/lease agreement.pdf",
 await page.fill("#query", "boom");
 await page.waitForFunction(() => document.body.dataset.error !== "");
 check("error is published", await body("error"), "search failed");
+await page.fill("#query", "slow");
+check("typing again clears the error before an answer comes", await body("error"), "");
 await page.fill("#query", "");
 await page.waitForFunction(() => document.body.dataset.phase === "empty");
 check("cleared field is empty again", await body("count"), "0");

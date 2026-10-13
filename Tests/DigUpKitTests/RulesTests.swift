@@ -209,6 +209,18 @@ import Testing
         #expect(try reason("notes") == nil)
     }
 
+    @Test func librariesAreSkippedOutsideCodeProjectsToo() throws {
+        // On purpose: no package.json, no .git, nothing that makes this a code project, and vendor/ still stays out.
+        try make("papers/vendor/invoice-2026-03.pdf")
+        try make("papers/notes/plan.pdf")
+        let root = folder.appendingPathComponent("papers")
+        let report = Crawler.crawl([root], options: IndexOptions())
+        #expect(report.candidates.map { ($0.path as NSString).lastPathComponent } == ["plan.pdf"])
+        #expect(report.skippedFolders["packages or libraries"] == 1)
+        let invoice = root.path + "/vendor/invoice-2026-03.pdf"
+        #expect(!Rules.isWalked(invoice, root: root.path, home: "/nowhere", excluded: []))
+    }
+
     @Test func ownFoldersAreNotLibraries() throws {
         try make("work/vendor-notes/invoice.pdf")
         #expect(try reason("work") == nil)

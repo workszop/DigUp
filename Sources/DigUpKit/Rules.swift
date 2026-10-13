@@ -17,7 +17,8 @@ public enum Rules {
         "node_modules", "bower_components", "venv", "site-packages", "__pycache__", "DerivedData", "Pods", "Carthage",
     ]
     /// Other people's software, installed or copied in: package folders, vendored and third-party code, conda
-    /// installs ("packages or libraries").
+    /// installs ("packages or libraries"). They're skipped everywhere on purpose, outside code projects too: a folder
+    /// named vendor or third_party is taken for someone else's code wherever it is.
     static let libraryFolderNames: Set<String> = [
         "dist-packages", "jspm_packages", "elm-stuff", "Godeps",
         "vendor", "third_party", "third-party", "thirdparty", "3rdparty",

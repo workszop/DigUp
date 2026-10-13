@@ -734,8 +734,10 @@ name = "digup-shell"
 version = "0.1.0"
 dependencies = [
  "gtk",
+ "http-range",
  "libc",
  "notify",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tauri",

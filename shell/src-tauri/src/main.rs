@@ -5,6 +5,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod helper;
+#[cfg(target_os = "linux")]
+mod media;
 mod open;
 mod options;
 mod settings;
@@ -484,6 +486,12 @@ fn make_panel(app: &AppHandle) -> tauri::Result<()> {
     if fixed {
         // The page then keeps to its window instead of asking for another size.
         builder = builder.initialization_script("window.__DIGUP_FIXED_HEIGHT__ = true;");
+    }
+    // WebKitGTK's player can't read asset:// URLs: on Linux the previews' sound and video come from media.rs.
+    #[cfg(target_os = "linux")]
+    match media::serve(app.asset_protocol_scope()) {
+        Ok(address) => builder = builder.initialization_script(format!("window.__DIGUP_MEDIA__ = {};", json!(address))),
+        Err(error) => eprintln!("digup-shell: no media server, previews won't play: {error}"),
     }
     let panel = builder
         .title("DigUp")

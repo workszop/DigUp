@@ -9,6 +9,9 @@ const tauri = window.__TAURI__;
 const invoke = (command, args) => tauri.core.invoke(command, args);
 const ask = (request) => invoke("ask", { request });
 const fileURL = (path) => tauri.core.convertFileSrc(path);
+// Sound and video: WebKitGTK's player can't read asset:// URLs, so on Linux they come from the shell (media.rs).
+const MEDIA = window.__DIGUP_MEDIA__;
+const mediaURL = (path) => MEDIA ? MEDIA + encodeURIComponent(path) : fileURL(path);
 
 const TYPING_PAUSE = 120;          // ms after the last keystroke until the meaning results show
 const ROWS_PER_GROUP = 6;
@@ -308,7 +311,7 @@ function picture(hit) {
       frame.replaceChildren(moment);
       frame.onclick = () => {
         const video = element("video");
-        video.src = `${fileURL(hit.path)}#t=${at}`;
+        video.src = `${mediaURL(hit.path)}#t=${at}`;
         video.controls = true;
         video.autoplay = true;
         frame.replaceChildren(video);
@@ -319,7 +322,7 @@ function picture(hit) {
       const audio = element("div", "audio-picture");
       audio.innerHTML = ICONS.audio;
       const player = element("audio");
-      player.src = `${fileURL(hit.path)}#t=${hit.loc ?? 0}`;
+      player.src = `${mediaURL(hit.path)}#t=${hit.loc ?? 0}`;
       player.controls = true;
       player.preload = "metadata";
       audio.append(player);

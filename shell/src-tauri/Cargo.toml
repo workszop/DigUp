@@ -22,9 +22,12 @@ tokio = { version = "1", features = ["sync"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# The panel's window as GTK sees it (Tauri's own, the version its runtime uses).
+# The panel's window as GTK sees it (Tauri's own, the version its runtime uses), and the previews' media server
+# (the range and path parsing Tauri's asset protocol uses).
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+http-range = "0.1.5"
+percent-encoding = "2.3.2"
 
 [profile.release]
 codegen-units = 1

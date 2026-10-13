@@ -70,7 +70,7 @@ ls Vendor/pdfium/lib
 if [[ "$STAMP" == *" ffmpeg "* ]]; then
   echo "ffmpeg ($FFMPEG_TAG, $FFMPEG_TAR)"
   mkdir "$T/ffmpeg"
-  curl -sSL -o "$T/ffmpeg/$FFMPEG_TAR" "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$FFMPEG_TAR"
+  curl -fsSL -o "$T/ffmpeg/$FFMPEG_TAR" "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$FFMPEG_TAR"
   (cd "$T/ffmpeg" && echo "$FFMPEG_SHA256  $FFMPEG_TAR" | sha256sum --check --quiet)
   rm -rf Vendor/ffmpeg && mkdir -p Vendor/ffmpeg/bin
   tar -xJf "$T/ffmpeg/$FFMPEG_TAR" -C Vendor/ffmpeg/bin --strip-components=2 \

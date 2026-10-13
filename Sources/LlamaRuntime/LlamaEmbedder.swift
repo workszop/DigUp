@@ -335,12 +335,16 @@ public final class LlamaEmbedder: Embedder {
 
     /// On Linux and Windows ggml's backends are shared libraries (GGML_BACKEND_DL, scripts/build-llama.sh): the CPU
     /// variants always, CUDA or Vulkan when the machine has them. They're looked for in $DIGUP_BACKENDS, then beside this
-    /// executable, then wherever ggml itself looks; whatever loads and works is what the model runs on.
+    /// executable, then (Linux) beside libggml, then wherever ggml itself looks; whatever loads and works is what the
+    /// model runs on.
     private static func loadBackends() {
         let environment = ProcessInfo.processInfo.environment
         var folders: [String] = []
         if let chosen = environment["DIGUP_BACKENDS"], !chosen.isEmpty { folders.append(chosen) }
         if let executable = Bundle.main.executableURL { folders.append(executable.deletingLastPathComponent().path) }
+        #if os(Linux)
+        if let ggml = ggmlFolder { folders.append(ggml) }
+        #endif
         for folder in folders where ggml_backend_dev_count() == 0 {
             ggml_backend_load_all_from_path(folder)
         }
@@ -348,6 +352,24 @@ public final class LlamaEmbedder: Embedder {
         LlamaLog.shared.line("backends: " + (0..<ggml_backend_reg_count()).map {
             String(cString: ggml_backend_reg_name(ggml_backend_reg_get($0)))
         }.joined(separator: ", "))
+    }
+    #endif
+
+    #if os(Linux)
+    /// The folder libggml was loaded from (as /proc/self/maps names it). Builds run where they were built (swift build,
+    /// swift test: the test runner is the toolchain's) find it in Vendor/llama/lib through the rpath, and the backends
+    /// are there, not beside the executable.
+    private static var ggmlFolder: String? {
+        // Read to the end: /proc files have no size to read up to.
+        guard let data = try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/proc/self/maps")).readToEnd() else {
+            return nil
+        }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            guard let slash = line.firstIndex(of: "/") else { continue }
+            let library = URL(fileURLWithPath: String(line[slash...]))
+            if library.lastPathComponent.hasPrefix("libggml.so") { return library.deletingLastPathComponent().path }
+        }
+        return nil
     }
     #endif
 }

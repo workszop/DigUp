@@ -204,13 +204,21 @@ fn open_hit(app: AppHandle, shell: State<'_, Arc<Shell>>, target: open::Target) 
     let Some(command) = planned else {
         return app.opener().open_path(target.path, None::<&str>).map_err(|error| error.to_string());
     };
-    let mut child = std::process::Command::new(&command[0])
+    let spawned = std::process::Command::new(&command[0])
         .args(&command[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("can't run {}: {error}", command[0]))?;
+        .spawn();
+    // The panel is already hidden, so an error here would go unseen: the file opens in its default app instead, at
+    // its start, and the reason goes to stderr (the service's journal).
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("digup-shell: can't run {}: {error}; opening {} in its default app", command[0], target.path);
+            return app.opener().open_path(target.path, None::<&str>).map_err(|error| error.to_string());
+        }
+    };
     // Reaped when it quits, so it doesn't linger as a zombie while DigUp runs.
     std::thread::spawn(move || {
         let _ = child.wait();

@@ -3,6 +3,8 @@
 //! its default app, at its start. Arguments go to the program as they are, never through a shell.
 
 use serde::Deserialize;
+use std::ffi::OsStr;
+use std::path::Path;
 
 /// What the panel knows of a result (a hit from `digup search-service`).
 #[derive(Clone, Debug, Deserialize)]
@@ -81,9 +83,24 @@ pub fn command(target: &Target, editor: &str, has: impl Fn(&str) -> bool) -> Opt
 
 /// Whether a program is on PATH.
 pub fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|folder| folder.join(name).is_file()))
-        .unwrap_or(false)
+    std::env::var_os("PATH").map(|paths| on_path_in(name, &paths)).unwrap_or(false)
+}
+
+/// Whether a program is in one of `paths` (a PATH value).
+fn on_path_in(name: &str, paths: &OsStr) -> bool {
+    std::env::split_paths(paths).any(|folder| runnable(&folder.join(name)))
+}
+
+/// A file that can be run: on unix, one with an exec bit set (a file without one would only fail to start).
+#[cfg(unix)]
+fn runnable(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    file.metadata().map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn runnable(file: &Path) -> bool {
+    file.is_file()
 }
 
 #[cfg(test)]
@@ -131,6 +148,28 @@ mod tests {
         assert_eq!(command(&code, "nano-not-here", only(&["zed"])), None);
         let cell = target("code", "cells", Some(2.0), None, "/r/n.ipynb");
         assert_eq!(command(&cell, "", only(&["zed"])), strings(&["zed", "/r/n.ipynb:1"]));
+    }
+
+    #[test]
+    fn on_path_finds_only_programs_it_can_run() {
+        let folder = std::env::temp_dir().join(format!("digup-on-path-{}", std::process::id()));
+        std::fs::create_dir_all(folder.join("evince")).unwrap(); // a folder named like a program
+        std::fs::write(folder.join("mpv"), "#!/bin/sh\n").unwrap();
+        std::fs::write(folder.join("okular"), "not a program\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(folder.join("mpv"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(folder.join("okular"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let paths = std::env::join_paths([std::path::Path::new("/nowhere-at-all"), &folder]).unwrap();
+        let found = |name| on_path_in(name, &paths);
+        assert!(found("mpv"));
+        assert!(!found("evince"));
+        assert!(!found("vlc"));
+        #[cfg(unix)]
+        assert!(!found("okular"), "a file without its exec bit isn't a program");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

@@ -51,6 +51,8 @@ struct Shell {
     rewatching: Mutex<()>,
     /// The folders changed: the next index helper started prunes what's under none of them (`--prune`).
     prune_wanted: AtomicBool,
+    /// Held while a change of folders is applied, so two in quick succession are applied in order.
+    applying: Mutex<()>,
     /// The tray menu's first line: what's going on.
     status: Mutex<Option<MenuItem<Wry>>>,
     /// When the search service last reloaded the index (while indexing, at most every few seconds).
@@ -416,6 +418,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         code_watcher: Mutex::new(None),
         rewatching: Mutex::new(()),
         prune_wanted: AtomicBool::new(false),
+        applying: Mutex::new(()),
         status: Mutex::new(None),
         reloaded: Mutex::new(Instant::now()),
         debug_query_sent: AtomicBool::new(false),
@@ -482,12 +485,13 @@ fn apply_folders(app: &AppHandle) {
     // Stopping the helpers waits for them, and watching walks the folders: neither belongs on the main thread.
     let app = app.clone();
     std::thread::spawn(move || {
+        let _in_order = shell.applying.lock().unwrap();
+        // A search service started from now on (the first, after one died, or after the code index went) gets them
+        // at launch; the running one is told.
+        shell.search.relaunch(shell.search_arguments());
         if settings.code_roots.is_empty() {
             remove_code_index(&shell);
         }
-        // A search service started from now on (the first, or after one died) gets them at launch; the running one
-        // is told.
-        shell.search.relaunch(shell.search_arguments());
         let request = json!({"op": "folders", "roots": folders, "skipped": settings.skipped,
                              "types": settings.skip_types, "code_roots": settings.code_roots,
                              "code_skipped": settings.code_skipped});
@@ -496,23 +500,25 @@ fn apply_folders(app: &AppHandle) {
     });
 }
 
-/// Code search is off: the code index goes, once no helper has it open (both stop; the search service starts again
-/// with the next request, without it).
+/// Code search is off: the code index goes, once no helper has it open. Both stop, and no search service starts
+/// until it's gone (a request meanwhile, such as the reload the index helper's exit asks for, waits); the next one
+/// starts without it, with the arguments `relaunch` gave.
 fn remove_code_index(shell: &Shell) {
     let Some(file) = shell.options.index_folder().map(|index| index.join("code.sqlite")) else { return };
     if !file.exists() {
         return;
     }
-    shell.index.stop();
-    shell.search.stop();
-    for suffix in ["", "-wal", "-shm"] {
-        let path = PathBuf::from(format!("{}{suffix}", file.display()));
-        if let Err(error) = std::fs::remove_file(&path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("digup-shell: can't delete {}: {error}", path.display());
+    shell.search.stop_while(|| {
+        shell.index.stop();
+        for suffix in ["", "-wal", "-shm"] {
+            let path = PathBuf::from(format!("{}{suffix}", file.display()));
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("digup-shell: can't delete {}: {error}", path.display());
+                }
             }
         }
-    }
+    });
     eprintln!("digup-shell: code search off, the code index was deleted");
 }
 

@@ -168,7 +168,8 @@ fn is_noise_name(name: &str) -> bool {
 /// made once per folder as it's walked; changes are filtered by name only, since inside such a folder nothing is
 /// watched to begin with.
 fn holds_installed_packages(folder: &Path) -> bool {
-    if folder.join("pyvenv.cfg").exists() || folder.join("CACHEDIR.TAG").exists() || folder.join("conda-meta").is_dir() {
+    let holds = |name: &str| folder.join(name).exists();
+    if holds("pyvenv.cfg") || holds("CACHEDIR.TAG") || folder.join("conda-meta").is_dir() {
         return true;
     }
     let named = |path: Option<&Path>, name: &str| path.and_then(Path::file_name).is_some_and(|found| found == name);

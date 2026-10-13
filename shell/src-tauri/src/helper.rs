@@ -213,6 +213,16 @@ impl SearchService {
             stop(searching.child, searching.stdin, &json!({"op": "quit"}).to_string());
         }
     }
+
+    /// Stops the running one and does `meanwhile` (deleting a file it had open) before another can start: a request
+    /// that comes in the meantime waits, then starts one with the arguments as they are by then.
+    pub fn stop_while(&self, meanwhile: impl FnOnce()) {
+        let mut running = self.running.lock().unwrap();
+        if let Some(searching) = running.take() {
+            stop(searching.child, searching.stdin, &json!({"op": "quit"}).to_string());
+        }
+        meanwhile();
+    }
 }
 
 /// `digup index-service`: syncs the index with the folders, indexes what's new, and exits once it's done. `run` starts
@@ -350,6 +360,43 @@ mod tests {
         let mut other = settings.clone();
         other.code_roots.pop();
         assert!(!same_work(&plain, &index_service_args(None, &other.folders, &other, false)));
+    }
+
+    #[test]
+    fn no_search_service_starts_while_the_old_one_is_stopped_and_its_index_cleared() {
+        let log = std::env::temp_dir().join(format!("digup-stop-while-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        // A stand-in that notes which launch it was, then answers each request with the request itself (cat).
+        let launch = |name: &str| Launch {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".into(), format!("echo {name} >> '{}'; exec cat", log.display())],
+            env: Vec::new(),
+            log: None,
+            background: false,
+        };
+        let lines = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>();
+        let service = SearchService::new(launch("old"), |_| {});
+        service.send(1, &json!({"op": "status"})).unwrap();
+        service.relaunch(launch("new").args);
+        let answered = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            service.stop_while(|| {
+                // A request now (the index helper's exit asks for a reload) has to wait for the index to go.
+                scope.spawn(|| {
+                    // Answered once the stand-in has noted its launch (it echoes the request after that).
+                    service.send(2, &json!({"op": "reload", "id": 2})).unwrap().blocking_recv().unwrap();
+                    answered.store(true, Ordering::SeqCst);
+                });
+                std::thread::sleep(Duration::from_millis(300));
+                assert!(!answered.load(Ordering::SeqCst), "a search service started while the index was going");
+                std::fs::write(&log, [lines(), vec!["index deleted".to_string()]].concat().join("\n") + "\n").unwrap();
+            });
+        });
+        assert!(answered.load(Ordering::SeqCst));
+        // The old one stopped, the index went, and only then did the next start, with the new arguments.
+        assert_eq!(lines(), ["old", "index deleted", "new"]);
+        service.stop();
+        let _ = std::fs::remove_file(&log);
     }
 
     #[test]

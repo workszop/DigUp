@@ -86,12 +86,20 @@ ln -sfn "$OPT/digup" "$BIN/digup"
 ln -sfn "$OPT/digup-shell" "$BIN/digup-shell"
 install -m 644 "$REPO/shell/src-tauri/icons/128x128.png" "$ICON"
 
+# Each format quotes a path its own way, so a HOME with a space (or a quote, or a $) in it still starts DigUp.
+# A menu entry's Exec: double quotes, with \ " ` $ escaped inside them, then every \ doubled again (the value is a
+# string first) and % doubled (field codes).
+desktop_quote() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g')"; }
+# The program in a unit's ExecStart: double quotes, with \ and " escaped inside them and % doubled (specifiers). A $
+# stays as it is: systemd expands no variables in the program itself, so "$$" there would be two dollars.
+systemd_quote() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"; }
+
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DigUp
 Comment=Search your files by what's in them
-Exec=$OPT/digup-shell --toggle
+Exec=$(desktop_quote "$OPT/digup-shell") --toggle
 Icon=digup
 Terminal=false
 Categories=Utility;
@@ -107,7 +115,7 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=$OPT/digup-shell
+ExecStart=$(systemd_quote "$OPT/digup-shell")
 Restart=on-failure
 KillMode=process
 

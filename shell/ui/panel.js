@@ -112,6 +112,7 @@ function show(reply, text, phase) {
 function failed(error) {
   state.error = String(error);
   renderFooter();
+  publish();
 }
 
 function rowIDs() {
@@ -156,7 +157,18 @@ function revealSelected() {
 
 // MARK: Drawing
 
+/// The panel's state on the page itself (data-* on <body> and the rows), so a probe reads it instead of the pixels
+/// (shell/ui/tests/panel-contract.mjs).
+function publish() {
+  const data = document.body.dataset;
+  data.phase = state.phase;
+  data.count = String(state.strong.length + state.weaker.length);
+  data.selected = state.selection ?? "";
+  data.error = state.error ?? "";
+}
+
 function render() {
+  publish();
   const empty = state.phase === "empty";
   const height = empty ? FIELD_HEIGHT : PANEL_HEIGHT;
   if (height !== state.height) {
@@ -194,6 +206,10 @@ function renderList() {
 
 function row(hit) {
   const item = element("div", "row" + (state.selection === hit.path ? " selected" : ""));
+  item.dataset.kind = hit.kind;
+  item.dataset.path = hit.path;
+  item.dataset.segment = hit.segment ?? "";
+  if (hit.loc != null) item.dataset.loc = String(hit.loc);
   item.setAttribute("role", "option");
   item.append(thumbnail(hit));
   const text = element("div", "row-text");
@@ -567,6 +583,8 @@ tauri.event.listen("helper", ({ payload }) => {
     if (state.phase !== "empty") renderFooter();
   }
 });
+
+publish();   // data-phase="empty" is there before anything is typed
 
 tauri.path.homeDir().then((home) => { state.home = home.replace(/[\\/]$/, ""); }).catch(() => {});
 

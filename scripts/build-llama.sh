@@ -5,9 +5,10 @@
 # a venv in Vendor/ (needs uv). Does nothing when that build is already there; build.sh runs it every time.
 # On Linux and Windows it builds shared libraries instead, with ggml's backends as modules loaded at run
 # time (GGML_BACKEND_DL): the CPU variants always, CUDA when nvcc is found (CUDACXX, or on PATH; CUDA_ARCHS picks the GPU
-# architectures, default native), else Vulkan when its SDK is; FLAVOR=cpu, cuda or vulkan picks one instead (a CPU build
-# on a machine that also has glslc, say). LLAMA_SOURCE / LLAMA_BUILD point at an existing clone and build folder. On
-# Windows it runs in Git for Windows' bash inside the MSVC environment (vcvars64) and leaves DLLs with their import
+# architectures, default native), else Vulkan when its SDK is (glslc found; on Ubuntu the packages libvulkan-dev, glslc
+# and spirv-headers); FLAVOR=cpu, cuda or vulkan picks one instead (a CPU build on a machine that also has glslc,
+# say). LLAMA_SOURCE / LLAMA_BUILD point at an existing clone and build folder (the result always goes to Vendor/llama).
+# On Windows it runs in Git for Windows' bash inside the MSVC environment (vcvars64) and leaves DLLs with their import
 # libraries.
 set -euo pipefail
 cd "$(dirname "$0")/.."

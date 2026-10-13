@@ -29,6 +29,8 @@ use watcher::FolderWatcher;
 
 const PANEL_WIDTH: f64 = 780.0;
 const FIELD_HEIGHT: f64 = 56.0;
+/// The panel with results (panel.js's PANEL_HEIGHT).
+const PANEL_HEIGHT: f64 = 480.0;
 
 /// What the commands and events share.
 struct Shell {
@@ -233,6 +235,9 @@ fn hide_panel(app: AppHandle) {
 /// The panel grows to show results and shrinks back to its field.
 #[tauri::command]
 fn panel_height(app: AppHandle, height: f64) {
+    if panel_keeps_its_height() {
+        return;
+    }
     if let Some(panel) = app.get_webview_window("panel") {
         let height = height.clamp(FIELD_HEIGHT, 640.0);
         #[cfg(target_os = "linux")]
@@ -465,9 +470,16 @@ fn quit(app: &AppHandle) {
 // MARK: Windows
 
 fn make_panel(app: &AppHandle) -> tauri::Result<()> {
-    let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()))
+    let fixed = panel_keeps_its_height();
+    let height = if fixed { PANEL_HEIGHT } else { FIELD_HEIGHT };
+    let mut builder = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()));
+    if fixed {
+        // The page then keeps to its window instead of asking for another size.
+        builder = builder.initialization_script("window.__DIGUP_FIXED_HEIGHT__ = true;");
+    }
+    let panel = builder
         .title("DigUp")
-        .inner_size(PANEL_WIDTH, FIELD_HEIGHT)
+        .inner_size(PANEL_WIDTH, height)
         .decorations(false)
         .transparent(true)
         .shadow(true)
@@ -480,7 +492,7 @@ fn make_panel(app: &AppHandle) -> tauri::Result<()> {
         .visible(false)
         .build()?;
     #[cfg(target_os = "linux")]
-    ask_for_panel_size(&panel, FIELD_HEIGHT);
+    ask_for_panel_size(&panel, height);
     let app = app.clone();
     panel.on_window_event(move |event| {
         // Like Spotlight: it steps away when you click elsewhere.
@@ -491,6 +503,14 @@ fn make_panel(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+/// COSMIC configures every floating window as tiled on all four sides (its "clip floating windows", on by default), and
+/// GTK then holds a window to the size the compositor gave it: the panel's own resizes never land. There it opens at its
+/// full height and keeps it.
+fn panel_keeps_its_height() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| desktop.split(':').any(|name| name == "COSMIC"))
 }
 
 /// GTK gives a window that can't be resized the size its content asks for, and a web page asks for none, which GTK

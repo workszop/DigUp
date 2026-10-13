@@ -14,6 +14,10 @@ const TYPING_PAUSE = 120;          // ms after the last keystroke until the mean
 const ROWS_PER_GROUP = 6;
 const FIELD_HEIGHT = 56;
 const PANEL_HEIGHT = 480;
+// On COSMIC the window can't change its size (main.rs `panel_keeps_its_height`): the panel stays at its full height,
+// with the results area empty until there's a query.
+const FIXED_HEIGHT = window.__DIGUP_FIXED_HEIGHT__ === true;
+if (FIXED_HEIGHT) document.documentElement.classList.add("fixed-height");
 const WEAKER = "\u0000weaker";     // the selectable row that folds and unfolds the weaker matches
 const isMac = /Mac/.test(navigator.platform);
 const isWindows = /Win/.test(navigator.platform);
@@ -171,7 +175,7 @@ function render() {
   publish();
   const empty = state.phase === "empty";
   const height = empty ? FIELD_HEIGHT : PANEL_HEIGHT;
-  if (height !== state.height) {
+  if (height !== state.height && !FIXED_HEIGHT) {
     state.height = height;
     invoke("panel_height", { height }).catch(() => {});
   }

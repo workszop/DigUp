@@ -130,6 +130,35 @@ await page.waitForFunction(() => document.body.dataset.phase === "codeHint");
 check("code: alone says what to type", await page.$eval("#preview strong", (node) => node.textContent), "Search your code");
 check("no page errors", errors, []);
 
+// Code search on from the start (code folders chosen before the panel loaded): "code:" words search code at once.
+const codePage = await browser.newPage();
+await codePage.addInitScript((codeHits) => {
+  window.__calls = [];
+  window.__TAURI__ = {
+    core: {
+      invoke: async (command, args) => {
+        window.__calls.push({ command, args });
+        if (command === "code_search_on") return true;
+        if (command !== "ask") return null;
+        if (args.request.op === "search") return { hits: args.request.code ? codeHits : [], strong: 1, meaning: args.request.meaning };
+        return {};
+      },
+      convertFileSrc: (path) => "file://" + path,
+    },
+    event: { listen: async () => () => {} },
+    path: { homeDir: async () => "/t" },
+  };
+}, CODE_HITS);
+const codeErrors = [];
+codePage.on("pageerror", (error) => codeErrors.push(String(error)));
+await codePage.goto(page_);
+await codePage.waitForFunction(() => document.body.dataset.code === "on");
+check("code search on at load", await codePage.evaluate(() => document.body.dataset.code), "on");
+await codePage.fill("#query", "code: retry with backoff");
+await codePage.waitForFunction(() => document.body.dataset.phase === "meaning");
+check("code: searches code at once", await codePage.$$eval(".row", (rows) => rows.map((row) => row.dataset.kind)), ["code"]);
+check("no page errors (code on at load)", codeErrors, []);
+
 await browser.close();
 if (failures.length) { console.error(`${failures.length} contract check(s) failed`); process.exit(1); }
 console.log("panel contract holds");

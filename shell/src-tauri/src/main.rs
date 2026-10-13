@@ -234,7 +234,10 @@ fn hide_panel(app: AppHandle) {
 #[tauri::command]
 fn panel_height(app: AppHandle, height: f64) {
     if let Some(panel) = app.get_webview_window("panel") {
-        let _ = panel.set_size(LogicalSize::new(PANEL_WIDTH, height.clamp(FIELD_HEIGHT, 640.0)));
+        let height = height.clamp(FIELD_HEIGHT, 640.0);
+        #[cfg(target_os = "linux")]
+        ask_for_panel_size(&panel, height);
+        let _ = panel.set_size(LogicalSize::new(PANEL_WIDTH, height));
     }
 }
 
@@ -476,6 +479,8 @@ fn make_panel(app: &AppHandle) -> tauri::Result<()> {
         .skip_taskbar(true)
         .visible(false)
         .build()?;
+    #[cfg(target_os = "linux")]
+    ask_for_panel_size(&panel, FIELD_HEIGHT);
     let app = app.clone();
     panel.on_window_event(move |event| {
         // Like Spotlight: it steps away when you click elsewhere.
@@ -486,6 +491,19 @@ fn make_panel(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+/// GTK gives a window that can't be resized the size its content asks for, and a web page asks for none, which GTK
+/// takes as 200 points: the panel would never shrink to its field. So the window itself asks for the panel's size.
+#[cfg(target_os = "linux")]
+fn ask_for_panel_size(panel: &tauri::WebviewWindow, height: f64) {
+    use gtk::prelude::WidgetExt;
+    let window = panel.clone();
+    let _ = panel.run_on_main_thread(move || {
+        if let Ok(gtk_window) = window.gtk_window() {
+            gtk_window.set_size_request(PANEL_WIDTH as i32, height as i32);
+        }
+    });
 }
 
 fn show_panel(app: &AppHandle) {

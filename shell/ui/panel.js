@@ -549,15 +549,16 @@ ICONS.screenshot = ICONS.image;
 $query.addEventListener("input", queryChanged);
 
 // The gear never takes the caret from the field; the window it opens is the tray's Choose Folders.
+$folders.title = `Choose folders (${MOD},)`;
 $folders.addEventListener("mousedown", (event) => event.preventDefault());
 $folders.addEventListener("click", chooseFolders);
 
 document.addEventListener("keydown", (event) => {
   if (event.isComposing) return; // an input method is composing: its keys
   const modifier = isMac ? event.metaKey : event.ctrlKey;
-  if (modifier && event.key === ",") {
+  if (modifier && event.key === "," && !event.altKey && !event.shiftKey) {
     event.preventDefault();
-    chooseFolders();
+    if (!event.repeat) chooseFolders();
     return;
   }
   switch (event.key) {
@@ -572,6 +573,7 @@ document.addEventListener("keydown", (event) => {
       move(event.key === "ArrowDown" ? 1 : -1);
       break;
     case "Enter":
+      if (event.target === $folders) return; // the focused gear answers its own Enter
       event.preventDefault();
       if (modifier) revealSelected();
       else if (state.selection === WEAKER) toggleWeaker();

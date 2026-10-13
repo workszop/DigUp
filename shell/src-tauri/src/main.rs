@@ -244,9 +244,17 @@ fn hide_panel(app: AppHandle) {
 
 /// The gear in the panel: the panel gets out of the way, then the window the tray's "Choose Folders…" opens appears.
 #[tauri::command]
-fn choose_folders(app: AppHandle) -> Result<(), String> {
-    hide_panel(app.clone());
-    show_setup(&app).map_err(|error| error.to_string())
+async fn choose_folders(app: AppHandle) -> Result<(), String> {
+    // Windows deadlock when a sync command makes a window, and an async command isn't on the main thread, where
+    // GTK wants windows hidden and made. So the main thread does both, and the command waits for the answer.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        hide_panel(handle.clone());
+        let _ = sender.send(show_setup(&handle).map_err(|error| error.to_string()));
+    })
+    .map_err(|error| error.to_string())?;
+    receiver.recv().map_err(|error| error.to_string())?
 }
 
 /// The panel grows to show results and shrinks back to its field.

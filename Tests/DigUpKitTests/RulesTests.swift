@@ -161,4 +161,78 @@ import Testing
         #expect(walked("/Users/me/Documentsx/a.pdf", root: "/Users/me/Documentsx"))
         #expect(!walked("/Users/me/Documentsx/a.pdf", root: "/Users/me/Documents"))
     }
+
+    // MARK: Installed packages and libraries
+
+    func reason(_ relative: String) throws -> String? {
+        let url = folder.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return Rules.skipReason(forFolder: url, home: "/nowhere", excluded: [])
+    }
+
+    func make(_ relative: String, folder isFolder: Bool = false) throws {
+        let url = folder.appendingPathComponent(relative)
+        if isFolder {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } else {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: url)
+        }
+    }
+
+    @Test func librariesAreSkippedByName() throws {
+        for name in ["dist-packages", "jspm_packages", "elm-stuff", "Godeps", "vendor", "third_party", "third-party",
+                     "thirdparty", "3rdparty", "miniconda3", "anaconda3", "miniforge3", "mambaforge"] {
+            #expect(try reason("names/\(name)") == "packages or libraries", "\(name)")
+        }
+        // The names skipped before keep their reason.
+        #expect(try reason("names/node_modules") == "developer folder")
+        #expect(try reason("names/site-packages") == "developer folder")
+    }
+
+    @Test func installedPackagesAreSkippedByWhatTheyHold() throws {
+        try make("envs/myenv/pyvenv.cfg")                       // a virtualenv, whatever it's called
+        try make("envs/ml/conda-meta", folder: true)            // a conda environment
+        try make("caches/target/CACHEDIR.TAG")                 // Cargo's target/ and other tagged caches
+        try make("go/pkg/mod/cache/download", folder: true)    // Go's module cache
+        #expect(try reason("envs/myenv") == "installed packages")
+        #expect(try reason("envs/ml") == "installed packages")
+        #expect(try reason("caches/target") == "installed packages")
+        #expect(try reason("go/pkg/mod") == "installed packages")
+        // A folder named mod elsewhere, or a pkg/mod without the cache, is someone's own.
+        try make("project/mod/main.go")
+        try make("other/pkg/mod/readme.md")
+        #expect(try reason("project/mod") == nil)
+        #expect(try reason("other/pkg/mod") == nil)
+        // A conda-meta that's a file, not a folder, isn't one.
+        try make("notes/conda-meta")
+        #expect(try reason("notes") == nil)
+    }
+
+    @Test func ownFoldersAreNotLibraries() throws {
+        try make("work/vendor-notes/invoice.pdf")
+        #expect(try reason("work") == nil)
+        #expect(try reason("work/vendor-notes") == nil)
+        #expect(try reason("work/my-venv-notes") == nil)
+        #expect(try reason("work/vendors") == nil)
+    }
+
+    @Test func crawlLeavesInstalledPackagesOut() throws {
+        try make("project/notes.md")
+        try make("project/.venv-not-hidden/pyvenv.cfg")
+        try make("project/env/pyvenv.cfg")
+        try make("project/env/lib/python3.12/site/readme.md")
+        try make("project/third_party/lib/guide.pdf")
+        try make("project/vendor-notes/plan.md")
+        let report = Crawler.crawl([folder.appendingPathComponent("project")], options: IndexOptions())
+        let names = report.candidates.map { String($0.path.dropFirst(folder.path.count + 1)) }.sorted()
+        #expect(names == ["project/notes.md", "project/vendor-notes/plan.md"])
+        #expect(report.skippedFolders["installed packages"] == 1)     // env (the hidden one isn't walked at all)
+        #expect(report.skippedFolders["packages or libraries"] == 1)  // third_party
+        // The watcher's filter agrees with the crawl.
+        let root = folder.appendingPathComponent("project").path
+        #expect(!Rules.isWalked(root + "/env/lib/python3.12/site/readme.md", root: root, home: "/nowhere", excluded: []))
+        #expect(!Rules.isWalked(root + "/third_party/lib/guide.pdf", root: root, home: "/nowhere", excluded: []))
+        #expect(Rules.isWalked(root + "/vendor-notes/plan.md", root: root, home: "/nowhere", excluded: []))
+    }
 }

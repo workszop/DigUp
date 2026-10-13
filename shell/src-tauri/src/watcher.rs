@@ -12,13 +12,18 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Folders whose changes don't concern the code index: the Mac app's `Engine.codeNoise`
-/// (Sources/DigUpApp/Engine.swift), which is what `Rules.skippedFolderNames` and `Rules.codeSkippedFolderNames`
-/// (Sources/DigUpKit/Rules.swift) keep code search out of by name.
+/// Folders whose changes don't concern the code index, because code search never goes into them: the engine's
+/// `Rules.skippedFolderNames` (developer folders, then packages and libraries) and `Rules.codeSkippedFolderNames`, in
+/// Sources/DigUpKit/Rules.swift. Keep them the same. (The Mac app's `Engine.codeNoise` is a part of them.)
 const CODE_NOISE: &[&str] = &[
+    // Rules.developerFolderNames
     "node_modules", "bower_components", "venv", "site-packages", "__pycache__", "DerivedData", "Pods", "Carthage",
-    "vendor", "Vendor", "third_party", "build", "Build", "dist", "out", "target", "obj", "coverage", "wandb",
-    "mlruns", "lightning_logs",
+    // Rules.libraryFolderNames
+    "dist-packages", "jspm_packages", "elm-stuff", "Godeps", "vendor", "third_party", "third-party", "thirdparty",
+    "3rdparty", "miniconda3", "anaconda3", "miniforge3", "mambaforge",
+    // Rules.codeSkippedFolderNames
+    "Vendor", "vendored", "external", "extern", "deps", "build", "Build", "dist", "out", "target", "obj", "coverage",
+    "htmlcov", "generated", "__generated__", "wandb", "mlruns", "lightning_logs",
 ];
 
 /// When a burst of changes is over: once nothing has changed for `quiet`, or, with `longest`, that long after its
@@ -158,8 +163,20 @@ fn is_noise_name(name: &str) -> bool {
     name.starts_with('.') || CODE_NOISE.contains(&name)
 }
 
+/// Installed software, whatever the folder is called, told by what it holds: the engine's
+/// `Rules.holdsInstalledPackages` (a virtualenv, a conda environment, a tagged cache, Go's module cache). A few stats,
+/// made once per folder as it's walked; changes are filtered by name only, since inside such a folder nothing is
+/// watched to begin with.
+fn holds_installed_packages(folder: &Path) -> bool {
+    if folder.join("pyvenv.cfg").exists() || folder.join("CACHEDIR.TAG").exists() || folder.join("conda-meta").is_dir() {
+        return true;
+    }
+    let named = |path: Option<&Path>, name: &str| path.and_then(Path::file_name).is_some_and(|found| found == name);
+    named(Some(folder), "mod") && named(folder.parent(), "pkg") && folder.join("cache/download").is_dir()
+}
+
 /// `folder` and the folders under it that code search reads, without following links, and leaving out `ignore`
-/// (DigUp's index).
+/// (DigUp's index) and installed packages.
 fn code_folders_to_watch(folder: &Path, ignore: Option<&Path>) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut left = vec![folder.to_path_buf()];
@@ -171,7 +188,8 @@ fn code_folders_to_watch(folder: &Path, ignore: Option<&Path>) -> Vec<PathBuf> {
             // file_type doesn't follow links, so a link to a folder isn't walked (inotify doesn't follow them either).
             let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
             let noise = is_noise_name(&entry.file_name().to_string_lossy());
-            if is_folder && !noise && ignore.is_none_or(|ignore| path != ignore) {
+            let index = ignore.is_some_and(|ignore| path == ignore);
+            if is_folder && !noise && !index && !holds_installed_packages(&path) {
                 left.push(path);
             }
         }
@@ -196,6 +214,10 @@ mod tests {
                      "/home/me/src/app/vendor-notes/x.md"] {
             assert!(!is_code_noise(Path::new(code), &roots), "{code}");
         }
+        // The engine's own lists (Rules.swift): libraries and installed packages leave both indexes.
+        for library in ["dist-packages/x.py", "third-party/x.c", "miniconda3/lib/x.py", "Godeps/x.go", "external/x.c"] {
+            assert!(is_code_noise(&Path::new("/home/me/src/app").join(library), &roots), "{library}");
+        }
         // Hidden files count as noise too, as in the Mac app: the crawler never reads them.
         assert!(is_code_noise(Path::new("/home/me/src/app/.gitignore"), &roots));
         // Only what's under the code folder counts: a code folder may itself sit in a hidden or "build" folder.
@@ -219,6 +241,26 @@ mod tests {
             path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()
         }).collect();
         assert_eq!(names, ["", "app", "app/src", "app/src/deep", "tool", "tool/src"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn installed_packages_are_not_watched_whatever_their_name() {
+        let root = std::env::temp_dir().join(format!("digup-watch-packages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for folder in ["app/src", "app/env/lib", "app/ml/conda-meta", "app/cache/data", "go/pkg/mod/cache/download",
+                       "app/mod", "app/notes"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        std::fs::write(root.join("app/env/pyvenv.cfg"), "home = /usr/bin").unwrap();
+        std::fs::write(root.join("app/cache/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
+        std::fs::write(root.join("app/notes/conda-meta"), "a file, not a conda env").unwrap();
+        let mut watched = code_folders_to_watch(&root, None);
+        watched.sort();
+        let names: Vec<String> = watched.iter().map(|path| {
+            path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()
+        }).collect();
+        assert_eq!(names, ["", "app", "app/mod", "app/notes", "app/src", "go", "go/pkg"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -217,7 +217,8 @@ import Testing
         #expect(crawlNames(codeOptions) == ["app/README.md", "app/main.py", "app/notes/todo.md", "loose/backup.sh"])
         let report = Crawler.crawl([folder], options: codeOptions)
         #expect(report.skipped["ignored by git"] == 1)
-        #expect(report.skippedFolders["vendored or built code"] == 2)
+        #expect(report.skippedFolders["vendored or built code"] == 1)   // build
+        #expect(report.skippedFolders["packages or libraries"] == 1)    // vendor, left out of both indexes
         #expect(report.skippedFolders["submodule or worktree"] == 1)
         // A repo's subfolder chosen on its own still follows the repo's .gitignore.
         let sub = Crawler.crawl([folder.appendingPathComponent("app")], options: codeOptions).candidates

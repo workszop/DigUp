@@ -9,9 +9,19 @@ public enum Classification: Equatable, Sendable {
 /// What gets indexed. The defaults come from a real developer's Mac: Spotlight types 57k TypeScript files as movies,
 /// one repo holds a 55k-clip dataset, and screenshot tools move screenshots into code projects.
 public enum Rules {
-    /// Folders never worth walking into. Hidden folders and bundles are skipped by the enumerator itself.
-    static let skippedFolderNames: Set<String> = [
+    /// Folders never worth walking into, by either index. Hidden folders (.venv, .cargo, .npm) and bundles are
+    /// skipped by the enumerator itself.
+    static let skippedFolderNames: Set<String> = developerFolderNames.union(libraryFolderNames)
+    /// What developer tools make and fill ("developer folder").
+    static let developerFolderNames: Set<String> = [
         "node_modules", "bower_components", "venv", "site-packages", "__pycache__", "DerivedData", "Pods", "Carthage",
+    ]
+    /// Other people's software, installed or copied in: package folders, vendored and third-party code, conda
+    /// installs ("packages or libraries").
+    static let libraryFolderNames: Set<String> = [
+        "dist-packages", "jspm_packages", "elm-stuff", "Godeps",
+        "vendor", "third_party", "third-party", "thirdparty", "3rdparty",
+        "miniconda3", "anaconda3", "miniforge3", "mambaforge",
     ]
 
     /// Any of these in a folder makes it a code project, where only screenshots are indexed.
@@ -53,13 +63,12 @@ public enum Rules {
         "Makefile", "makefile", "GNUmakefile", "Dockerfile", "Containerfile", "Justfile", "justfile", "Rakefile",
         "Gemfile", "Podfile", "Brewfile", "Procfile", "Vagrantfile", "Jenkinsfile",
     ]
-    /// Folders code search doesn't go into, besides what git ignores: other people's code kept in a repo (vendor/,
-    /// third_party/), what builds and runs leave (build/, dist/, a wandb run's copy of the code), for repos whose
-    /// .gitignore doesn't list them and folders that aren't in git at all.
+    /// Folders code search doesn't go into, besides what git ignores and `skippedFolderNames` (which both indexes
+    /// skip): other people's code kept in a repo (Vendor/, external/), what builds and runs leave (build/, dist/, a
+    /// wandb run's copy of the code), for repos whose .gitignore doesn't list them and folders that aren't in git.
     static let codeSkippedFolderNames: Set<String> = [
-        "vendor", "Vendor", "vendored", "third_party", "third-party", "thirdparty", "3rdparty", "external", "extern",
-        "deps", "build", "Build", "dist", "out", "target", "obj", "coverage", "htmlcov", "generated", "__generated__",
-        "wandb", "mlruns", "lightning_logs",
+        "Vendor", "vendored", "external", "extern", "deps", "build", "Build", "dist", "out", "target", "obj",
+        "coverage", "htmlcov", "generated", "__generated__", "wandb", "mlruns", "lightning_logs",
     ]
 
     /// What code search reads in the code folders: source files, a repo's docs and settings, and notebooks. Never data
@@ -141,11 +150,31 @@ public enum Rules {
 
     static func skipReason(forFolder url: URL, home: String, excluded: [String]) -> String? {
         let name = url.lastPathComponent
-        if skippedFolderNames.contains(name) { return "developer folder" }
+        if developerFolderNames.contains(name) { return "developer folder" }
+        if libraryFolderNames.contains(name) { return "packages or libraries" }
         if name.hasSuffix(".noindex") { return ".noindex folder" }
         if url.path == home + "/Library" { return "~/Library" }
         if excluded.contains(where: { url.path == $0 || url.path.hasPrefix($0 + "/") }) { return "excluded folder" }
+        if holdsInstalledPackages(url) { return "installed packages" }
         return nil
+    }
+
+    /// Installed software, whatever the folder is called, told by what it holds: a Python virtualenv (pyvenv.cfg), a
+    /// conda environment or install (conda-meta/), a cache tagged as one (CACHEDIR.TAG: Cargo's target/ and many
+    /// tools' caches), Go's module cache (pkg/mod, holding cache/download). A few stats, and only for folders.
+    static func holdsInstalledPackages(_ url: URL) -> Bool {
+        let path = url.path
+        let files = FileManager.default
+        func isFolder(_ path: String) -> Bool {
+            var folder: ObjCBool = false
+            return files.fileExists(atPath: path, isDirectory: &folder) && folder.boolValue
+        }
+        if files.fileExists(atPath: path + "/pyvenv.cfg") || files.fileExists(atPath: path + "/CACHEDIR.TAG") {
+            return true
+        }
+        if isFolder(path + "/conda-meta") { return true }
+        return url.lastPathComponent == "mod" && url.deletingLastPathComponent().lastPathComponent == "pkg"
+            && isFolder(path + "/cache/download")
     }
 
     static func isProjectRoot(_ folder: String) -> Bool {

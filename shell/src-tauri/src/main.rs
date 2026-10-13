@@ -240,7 +240,10 @@ fn main() {
         }
     };
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_panel(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            // A second launch: `--toggle` (the desktop's shortcut) shows or hides the panel, anything else shows it.
+            if args.iter().any(|arg| arg == "--toggle") { toggle_panel(app) } else { show_panel(app) }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -337,7 +340,10 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         eprintln!("digup-shell: no tray icon: {error}");
     }
     let hotkey = shell.hotkey();
-    if let Err(error) = app.global_shortcut().register(hotkey.as_str()) {
+    if wayland_session() {
+        // Wayland gives no app a global hotkey: the installer binds the desktop's shortcut to `digup-shell --toggle`.
+        eprintln!("digup-shell: Wayland session, the panel opens with the desktop's shortcut (digup-shell --toggle)");
+    } else if let Err(error) = app.global_shortcut().register(hotkey.as_str()) {
         set_status(&handle, &format!("The shortcut {} is taken", shortcut_text(&hotkey)));
         eprintln!("digup-shell: can't use {hotkey} as the shortcut: {error}");
     }
@@ -360,10 +366,15 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     } else {
         show_setup(&handle)?;
     }
-    if shell.options.debug_show {
+    if shell.options.debug_show || shell.options.toggle {
         show_panel(&handle);
     }
     Ok(())
+}
+
+/// A Wayland session (Linux): global hotkeys can't be registered there.
+fn wayland_session() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// After setup or a change of folders: the search service, the watcher and indexing follow the new folders.

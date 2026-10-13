@@ -31,10 +31,24 @@ pub struct Options {
     pub debug_quit: bool,
     /// Debug runs: show the panel at launch and keep it up when it loses focus.
     pub debug_show: bool,
+    /// Show the panel, or hide it if it's showing: what the desktop's own shortcut runs where an app can't take a
+    /// global hotkey (Wayland). A running DigUp gets it through the single-instance plugin.
+    pub toggle: bool,
 }
 
 impl Options {
+    /// The options this program was launched with.
     pub fn from_args() -> Result<Options, String> {
+        let options = Options::parse(std::env::args().skip(1))?;
+        // On a Mac the shell is only tried out: the helper's default index there is the Mac app's.
+        if cfg!(target_os = "macos") && options.index.is_none() {
+            return Err("pass --index: on a Mac the default index belongs to the DigUp app".into());
+        }
+        Ok(options)
+    }
+
+    /// The options these arguments give (the program's name left out).
+    pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         let mut options = Options {
             helper: default_helper(),
             index: None,
@@ -47,8 +61,8 @@ impl Options {
             debug_query: None,
             debug_quit: false,
             debug_show: false,
+            toggle: false,
         };
-        let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -64,12 +78,9 @@ impl Options {
                 "--debug-query" => options.debug_query = Some(value()?),
                 "--debug-quit" => options.debug_quit = true,
                 "--debug-show" => options.debug_show = true,
+                "--toggle" => options.toggle = true,
                 _ => return Err(format!("unknown argument {arg}")),
             }
-        }
-        // On a Mac the shell is only tried out: the helper's default index there is the Mac app's.
-        if cfg!(target_os = "macos") && options.index.is_none() {
-            return Err("pass --index: on a Mac the default index belongs to the DigUp app".into());
         }
         Ok(options)
     }
@@ -99,4 +110,17 @@ fn default_helper() -> PathBuf {
     };
     let inside = folder.join("helper").join(name);
     if inside.is_file() { inside } else { folder.join(name) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_is_a_flag() {
+        let options = Options::parse(["--toggle".to_string()].into_iter()).unwrap();
+        assert!(options.toggle);
+        let options = Options::parse(std::iter::empty()).unwrap();
+        assert!(!options.toggle);
+    }
 }
